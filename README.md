@@ -70,7 +70,7 @@ CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligen
 | Command | Description | Status |
 | :--- | :--- | :--- |
 | `codealign init` | Initialize `.codealign/` state and extract code intelligence | **Available** |
-| `codealign analyze` | Analyze codebase and plan to determine expected impact | Planned |
+| `codealign analyze` | Resolve plan references against repository code intelligence | **Available** |
 | `codealign baseline` | Generate the Implementation Baseline handoff artifact | Planned |
 | `codealign verify` | Verify Git changes against the baseline and code graph | Planned |
 | `codealign status` | View baseline and verification status | Planned |
@@ -107,8 +107,14 @@ pip install -e ".[dev]"
 ```bash
 codealign --help
 
-# Initialize CodeAlign in your repository
+# 1. Initialize CodeAlign and extract code intelligence
 codealign init
+
+# 2. Analyze an implementation plan against the codebase
+codealign analyze plan.md
+
+# 3. Output structured evidence in JSON (e.g. for agent input / baseline generation)
+codealign analyze plan.md --format json
 ```
 
 ---

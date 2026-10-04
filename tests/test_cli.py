@@ -54,14 +54,14 @@ def test_subcommand_help(command: str) -> None:
 
 
 def test_subcommand_placeholders() -> None:
-    """Verify subcommands run without unhandled errors as initial placeholders."""
+    """Verify implemented commands run and remaining placeholders output expected text."""
     result_init = runner.invoke(app, ["init", "--skip-graphify"])
     assert result_init.exit_code == 0
     assert "CodeAlign" in result_init.stdout
 
-    result_analyze = runner.invoke(app, ["analyze"])
-    assert result_analyze.exit_code == 0
-    assert "CodeAlign analyze" in result_analyze.stdout
+    result_analyze_help = runner.invoke(app, ["analyze", "--help"])
+    assert result_analyze_help.exit_code == 0
+    assert "Usage: codealign analyze" in result_analyze_help.stdout
 
     result_baseline = runner.invoke(app, ["baseline"])
     assert result_baseline.exit_code == 0
