@@ -80,13 +80,20 @@ def analyze_command(
 
     graph_path = codealign_dir / graph_rel
     if not graph_path.is_file():
-        typer.secho(
-            f"Error: Code intelligence graph not found at '{graph_path}'.\n"
-            "Run 'codealign init' to extract code intelligence from the repository.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
+        direct_graph = codealign_dir / "graph.json"
+        alt_graph = codealign_dir / "graphify-out" / "graph.json"
+        if direct_graph.is_file():
+            graph_path = direct_graph
+        elif alt_graph.is_file():
+            graph_path = alt_graph
+        else:
+            typer.secho(
+                f"Error: Code intelligence graph not found at '{graph_path}'.\n"
+                "Run 'codealign init' to extract code intelligence from the repository.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
 
     # 4. Parse plan markdown
     try:

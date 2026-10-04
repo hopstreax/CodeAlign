@@ -71,7 +71,7 @@ CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligen
 | :--- | :--- | :--- |
 | `codealign init` | Initialize `.codealign/` state and extract code intelligence | **Available** |
 | `codealign analyze` | Resolve plan references against repository code intelligence | **Available** |
-| `codealign baseline` | Generate the Implementation Baseline handoff artifact | Planned |
+| `codealign baseline` | Generate the Implementation Baseline contract (`baseline.json`) | **Available** |
 | `codealign verify` | Verify Git changes against the baseline and code graph | Planned |
 | `codealign status` | View baseline and verification status | Planned |
 | `codealign context` | Export agent-ready JSON/Markdown handoff context | Planned |
@@ -113,8 +113,14 @@ codealign init
 # 2. Analyze an implementation plan against the codebase
 codealign analyze plan.md
 
-# 3. Output structured evidence in JSON (e.g. for agent input / baseline generation)
+# 3. Output structured evidence in JSON
 codealign analyze plan.md --format json
+
+# 4. Generate the Implementation Baseline contract (.codealign/baseline.json)
+codealign baseline plan.md
+
+# 5. Output baseline contract in JSON (for agent handoff)
+codealign baseline plan.md --format json
 ```
 
 ---

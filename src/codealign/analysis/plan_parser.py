@@ -1,7 +1,7 @@
 """Developer implementation plan parser extracting explicit repository references."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 CODE_EXTENSIONS = {
@@ -45,6 +45,8 @@ class ParsedPlan:
     path: Path | None
     references: list[PlanReference]
     raw_content: str
+    goal: str = ""
+    steps: list[str] = field(default_factory=list)
 
 
 def _clean_token(token: str) -> str:
@@ -84,16 +86,76 @@ def _classify_reference(raw: str) -> PlanReference | None:
 
 
 def parse_plan_text(content: str, path: Path | None = None) -> ParsedPlan:
-    """Parse markdown text and extract title and explicit repository references."""
+    """Parse markdown text and extract title, goal, steps, and explicit repository references."""
     lines = content.splitlines()
 
-    # Extract title
+    # 1. Extract title
     title = path.stem if path else "Implementation Plan"
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("# "):
             title = stripped[2:].strip()
             break
+
+    # 2. Extract sections (Goal, Implementation steps, etc.)
+    goal_lines: list[str] = []
+    step_items: list[str] = []
+
+    current_section = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            sec_header = stripped[3:].strip().lower()
+            if any(
+                k in sec_header
+                for k in ("goal", "objective", "overview", "background", "summary", "description")
+            ):
+                current_section = "goal"
+            elif any(
+                k in sec_header for k in ("implementation", "step", "task", "plan", "requirement")
+            ):
+                current_section = "steps"
+            else:
+                current_section = "other"
+            continue
+        elif stripped.startswith("# "):
+            current_section = "preamble"
+            continue
+
+        if current_section == "goal":
+            if stripped:
+                goal_lines.append(stripped)
+        elif current_section == "steps":
+            m_num = re.match(r"^\d+[.)]\s+(.*)$", stripped)
+            m_bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+            if m_num:
+                step_items.append(m_num.group(1).strip())
+            elif m_bullet:
+                step_items.append(m_bullet.group(1).strip())
+
+    # Fallback if no explicit implementation section was found
+    if not step_items:
+        for line in lines:
+            stripped = line.strip()
+            m_num = re.match(r"^\d+[.)]\s+(.*)$", stripped)
+            m_bullet = re.match(r"^[-*+]\s+(.*)$", stripped)
+            if m_num:
+                step_items.append(m_num.group(1).strip())
+            elif m_bullet:
+                step_items.append(m_bullet.group(1).strip())
+
+    # Fallback if no explicit goal section was found
+    if not goal_lines:
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if re.match(r"^\d+[.)]\s+", stripped) or re.match(r"^[-*+]\s+", stripped):
+                break
+            if stripped:
+                goal_lines.append(stripped)
+
+    goal = " ".join(goal_lines).strip()
 
     seen_targets: set[str] = set()
     references: list[PlanReference] = []
@@ -129,6 +191,8 @@ def parse_plan_text(content: str, path: Path | None = None) -> ParsedPlan:
         path=path,
         references=references,
         raw_content=content,
+        goal=goal,
+        steps=step_items,
     )
 
 

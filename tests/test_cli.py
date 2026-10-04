@@ -63,9 +63,9 @@ def test_subcommand_placeholders() -> None:
     assert result_analyze_help.exit_code == 0
     assert "Usage: codealign analyze" in result_analyze_help.stdout
 
-    result_baseline = runner.invoke(app, ["baseline"])
-    assert result_baseline.exit_code == 0
-    assert "CodeAlign baseline" in result_baseline.stdout
+    result_baseline_help = runner.invoke(app, ["baseline", "--help"])
+    assert result_baseline_help.exit_code == 0
+    assert "Usage: codealign baseline" in result_baseline_help.stdout
 
     result_verify_term = runner.invoke(app, ["verify"])
     assert result_verify_term.exit_code == 0

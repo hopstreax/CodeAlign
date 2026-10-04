@@ -1,6 +1,10 @@
 """Implementation baseline models."""
 
-from pydantic import BaseModel, Field
+import json
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 
 class ExpectedFile(BaseModel):
@@ -8,28 +12,187 @@ class ExpectedFile(BaseModel):
 
     path: str = Field(description="Repository-relative file path")
     action: str = Field(
-        default="modify", description="Expected file action: add, modify, or delete"
+        default="modify", description="Expected file action: modify, create, delete, or unresolved"
     )
+    status: str = Field(
+        default="resolved",
+        description="Resolution status: resolved, expected, or unresolved",
+    )
+    reason: str = Field(default="", description="Reason why this file is expected or unresolved")
+
+
+class ExpectedSymbol(BaseModel):
+    """Symbol expected to be added, modified, or targeted during implementation."""
+
+    name: str = Field(description="Symbol name (e.g. Class.method or function_name)")
+    kind: str = Field(default="symbol", description="Symbol kind: method, function, class, etc.")
+    file_path: str = Field(default="", description="Containing file path if known")
+    line: int | None = Field(default=None, description="Line number if known")
+    status: str = Field(
+        default="existing", description="Symbol status: existing, unresolved, or new"
+    )
+    reason: str = Field(default="", description="Reason this symbol is an expectation")
+
+
+class ExpectedTest(BaseModel):
+    """Test suite or file expected to be modified or verified."""
+
+    path: str = Field(description="Path to the test file")
+    reason: str = Field(default="", description="Reason this test is expected")
+
+
+class ExpectedRelationship(BaseModel):
+    """Relationship explicitly expected between entities."""
+
+    source: str = Field(description="Source entity")
+    target: str = Field(description="Target entity")
+    relation: str = Field(description="Expected relation type")
+    reason: str = Field(default="", description="Reason this relationship is expected")
+
+
+class BaselineRepositoryInfo(BaseModel):
+    """Repository state at the time of baseline generation."""
+
+    name: str = Field(default="", description="Repository name")
+    branch: str = Field(default="", description="Active Git branch")
+    commit: str = Field(default="", description="HEAD commit SHA")
+    root: str | None = Field(
+        default=None, exclude=True, description="Deprecated local path (excluded from export)"
+    )
+
+
+class BaselineIntent(BaseModel):
+    """Developer intent preserved from the implementation plan."""
+
+    plan_file: str = Field(default="", description="Source plan file path")
+    title: str = Field(default="", description="Plan title")
+    goal: str = Field(default="", description="Stated goal or objective")
+    steps: list[str] = Field(
+        default_factory=list, description="Implementation steps or requirements"
+    )
+
+
+class BaselineEvidenceItem(BaseModel):
+    """Repository evidence grounded for an explicit plan reference."""
+
+    reference: str = Field(description="Original reference in the plan")
+    status: str = Field(description="Resolution status: resolved or unresolved")
+    kind: str = Field(default="unknown", description="Entity kind")
+    symbol: str = Field(default="", description="Resolved symbol name")
+    file_path: str = Field(default="", description="File path")
+    line: int | None = Field(default=None, description="Source line number")
+    reason: str = Field(default="", description="Explanation if unresolved")
+    symbols_in_file: list[dict[str, Any]] = Field(
+        default_factory=list, description="Symbols in file if kind is file"
+    )
+    callers: list[dict[str, Any]] = Field(default_factory=list, description="Callers of the symbol")
+    callees: list[dict[str, Any]] = Field(default_factory=list, description="Callees of the symbol")
+    relationships: list[dict[str, Any]] = Field(
+        default_factory=list, description="Connected relationships"
+    )
+
+
+class BaselineEvidence(BaseModel):
+    """Repository evidence captured during baseline analysis."""
+
+    summary: dict[str, Any] = Field(default_factory=dict, description="Summary statistics")
+    resolved: list[BaselineEvidenceItem] = Field(default_factory=list)
+    unresolved: list[BaselineEvidenceItem] = Field(default_factory=list)
+
+
+class BaselineExpectations(BaseModel):
+    """Conservative expectations derived strictly from developer intent and evidence."""
+
+    expected_files: list[ExpectedFile] = Field(default_factory=list)
+    expected_symbols: list[ExpectedSymbol] = Field(default_factory=list)
+    expected_tests: list[ExpectedTest] = Field(default_factory=list)
+    expected_relationships: list[ExpectedRelationship] = Field(default_factory=list)
 
 
 class ImplementationBaseline(BaseModel):
     """The central implementation contract generated by CodeAlign.
 
-    Captures expected files, symbols, architectural constraints, and impact
-    before implementation begins. Acts as the handoff contract to coding agents.
+    Captures intent, repository evidence, and derived expectations before
+    implementation begins. Serves as the ground-truth contract for verification.
     """
 
-    version: str = Field(default="0.1.0", description="Baseline schema version")
-    plan_title: str = Field(default="", description="Title of the associated implementation plan")
-    expected_files: list[ExpectedFile] = Field(
-        default_factory=list,
-        description="Files expected to be touched by the implementation",
-    )
-    expected_symbols: list[str] = Field(
-        default_factory=list,
-        description="Key symbols (classes, functions, methods) expected to be added or modified",
-    )
-    constraints: list[str] = Field(
-        default_factory=list,
-        description="Architectural or structural constraints that must not be violated",
-    )
+    schema_version: str = Field(default="0.1.0", description="Baseline schema version")
+    generated_at: str = Field(default="", description="ISO timestamp of generation")
+    repository: BaselineRepositoryInfo = Field(default_factory=BaselineRepositoryInfo)
+    intent: BaselineIntent = Field(default_factory=BaselineIntent)
+    evidence: BaselineEvidence = Field(default_factory=BaselineEvidence)
+    expectations: BaselineExpectations = Field(default_factory=BaselineExpectations)
+    constraints: list[str] = Field(default_factory=list, description="Architectural constraints")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_validator(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "plan_title" in data and "intent" not in data:
+                data["intent"] = {"title": data.pop("plan_title")}
+            if "version" in data and "schema_version" not in data:
+                data["schema_version"] = data.pop("version")
+            if (
+                "expected_files" in data or "expected_symbols" in data
+            ) and "expectations" not in data:
+                exp_dict: dict[str, Any] = {}
+                if "expected_files" in data:
+                    exp_dict["expected_files"] = data.pop("expected_files")
+                if "expected_symbols" in data:
+                    raw_syms = data.pop("expected_symbols")
+                    exp_dict["expected_symbols"] = [
+                        {"name": s} if isinstance(s, str) else s for s in raw_syms
+                    ]
+                data["expectations"] = exp_dict
+        return data
+
+    @property
+    def version(self) -> str:
+        return self.schema_version
+
+    @property
+    def plan_title(self) -> str:
+        return self.intent.title
+
+    @property
+    def expected_files(self) -> list[ExpectedFile]:
+        return self.expectations.expected_files
+
+    @property
+    def expected_symbols(self) -> list[str]:
+        return [s.name for s in self.expectations.expected_symbols]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert baseline model to serializable dictionary."""
+        return self.model_dump()
+
+    def to_json(self, indent: int = 2) -> str:
+        """Serialize baseline model to formatted JSON."""
+        return json.dumps(self.to_dict(), indent=indent)
+
+    def write_to_file(self, target_path: Path) -> None:
+        """Write baseline artifact to disk."""
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(self.to_json(), encoding="utf-8")
+
+    def format_terminal(self, output_path: str = ".codealign/baseline.json") -> str:
+        """Format a clear, human-readable terminal summary report."""
+        lines: list[str] = []
+        lines.append("BASELINE GENERATED\n")
+        lines.append(f"Plan:\n  {self.intent.title}\n")
+        lines.append(f"Resolved references:\n  {len(self.evidence.resolved)}\n")
+        lines.append(f"Unresolved references:\n  {len(self.evidence.unresolved)}\n")
+
+        lines.append("Expected files:")
+        if self.expectations.expected_files:
+            for f in self.expectations.expected_files:
+                if f.status == "unresolved":
+                    lines.append(f"  {f.path} (unresolved)")
+                else:
+                    lines.append(f"  {f.path}")
+        else:
+            lines.append("  (none)")
+        lines.append("")
+
+        lines.append(f"Output:\n  {output_path}")
+        return "\n".join(lines).strip()
