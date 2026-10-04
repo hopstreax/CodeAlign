@@ -26,6 +26,9 @@ htmlcov/
 # CodeAlign local project runtime state
 .codealign/
 
+# Graphify output and extraction cache
+graphify-out/
+
 # IDE and editors
 .idea/
 .vscode/
