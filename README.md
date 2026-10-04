@@ -1,0 +1,114 @@
+# CodeAlign
+
+> **Keep implementations aligned with developer intent.**
+
+CodeAlign is a standalone, open-source developer CLI that analyzes an implementation plan against your real codebase, generates an **Implementation Baseline**, and later verifies whether the actual implementation matches that baseline.
+
+---
+
+## The Problem
+
+AI-assisted coding agents and human developers alike frequently introduce:
+- **Scope drift:** Modifying unrelated files or creating unintended abstractions.
+- **Architectural drift:** Violating architectural patterns, introducing forbidden dependencies, or ignoring existing conventions.
+- **Missing implementation:** Skipping test coverage, error handling, or key requirements from the initial plan.
+- **Premature / misaligned code:** Producing hallucinations or poorly grounded changes that look correct on the surface but drift from the codebase structure.
+
+Existing tools often rely on subjective "AI-slop" detection or post-hoc heuristics. CodeAlign instead grounds verification in **concrete repository code intelligence, explicit developer intent, and Git diffs**.
+
+---
+
+## The Core Workflow
+
+```text
+Implementation Plan
+        ↓
+CodeAlign Baseline Analysis
+        ↓
+Implementation Baseline  ─── (Handoff Context) ───►  Coding Agent / Developer
+                                                             ↓
+                                                       Implementation
+                                                             ↓
+                                                    Git Changes / Diff
+                                                             ↓
+                                                     CodeAlign Verify
+                                                             ↓
+                                                   PASS / WARN / FAIL
+                                                    (with Evidence)
+```
+
+1. **Intent & Analysis:** You provide an implementation plan. CodeAlign analyzes the target codebase using code intelligence (symbols, dependencies, callers, callees).
+2. **Implementation Baseline:** CodeAlign creates a structured baseline (`.codealign/baseline.json`) defining expected files, expected symbols, relationships, constraints, and verification criteria.
+3. **Agent Handoff:** The baseline serves as the **handoff contract and context** for coding agents (e.g., Claude Code, Cursor, Codex, OpenCode) to start implementation with clear boundaries.
+4. **Deterministic Verification:** After changes are made, `codealign verify` inspects the Git changes against the baseline and codebase graph, producing deterministic, evidence-backed findings.
+
+---
+
+## Relationship with Graphify
+
+CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligence engine for deep static code analysis (symbol resolution, call graphs, import graphs, and dependency tracking). 
+
+- **Graphify** provides the code intelligence: repository structure, symbols, callers, callees, and dependencies.
+- **CodeAlign** owns developer intent, the implementation baseline contract, expected impact, change verification, and agent feedback.
+- CodeAlign accesses code intelligence through an abstract `CodeIntelligenceProvider` interface, allowing pluggable engines in the future without coupling the application to specific analyzer internals.
+
+---
+
+## What CodeAlign Is NOT
+
+- **Not an AI coding agent:** CodeAlign does not write your application code. The coding agent or human engineer implements the solution.
+- **Not an AI-slop detector:** CodeAlign provides deterministic verification grounded in code graphs and developer intent, not subjective LLM scoring.
+- **Not an automatic planner:** The developer remains in control of engineering decisions and implementation plans.
+
+---
+
+## Status & Roadmap
+
+> [!NOTE]
+> CodeAlign is currently in active pre-alpha development (bootstrap phase).
+
+| Command | Description | Status |
+| :--- | :--- | :--- |
+| `codealign init` | Initialize `.codealign/` state in a repository | Planned |
+| `codealign analyze` | Analyze codebase and plan to determine expected impact | Planned |
+| `codealign baseline` | Generate the Implementation Baseline handoff artifact | Planned |
+| `codealign verify` | Verify Git changes against the baseline and code graph | Planned |
+| `codealign status` | View baseline and verification status | Planned |
+| `codealign context` | Export agent-ready JSON/Markdown handoff context | Planned |
+| `codealign explain` | Explain findings and provide evidence-backed guidance | Planned |
+
+---
+
+## Installation & Quickstart
+
+### Prerequisites
+
+- Python 3.12+
+- Git
+
+### Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/CodeAlign.git
+cd CodeAlign
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Or on Windows: .\.venv\Scripts\Activate.ps1
+
+# Install in editable mode
+pip install -e ".[dev]"
+```
+
+### Basic CLI Usage
+
+```bash
+codealign --help
+```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
