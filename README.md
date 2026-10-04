@@ -69,7 +69,7 @@ CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligen
 
 | Command | Description | Status |
 | :--- | :--- | :--- |
-| `codealign init` | Initialize `.codealign/` state in a repository | Planned |
+| `codealign init` | Initialize `.codealign/` state and extract code intelligence | **Available** |
 | `codealign analyze` | Analyze codebase and plan to determine expected impact | Planned |
 | `codealign baseline` | Generate the Implementation Baseline handoff artifact | Planned |
 | `codealign verify` | Verify Git changes against the baseline and code graph | Planned |
@@ -85,12 +85,13 @@ CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligen
 
 - Python 3.12+
 - Git
+- [Graphify](https://github.com/Graphify-Labs/graphify) (`pip install graphifyy`)
 
 ### Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/CodeAlign.git
+git clone https://github.com/hopstreax/CodeAlign.git
 cd CodeAlign
 
 # Create virtual environment
@@ -105,6 +106,9 @@ pip install -e ".[dev]"
 
 ```bash
 codealign --help
+
+# Initialize CodeAlign in your repository
+codealign init
 ```
 
 ---

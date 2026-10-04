@@ -38,7 +38,6 @@ class Finding(BaseModel):
     evidence: str | None = Field(
         default=None,
         description=(
-            "Deterministic evidence supporting the finding "
-            "(e.g. diff snippet or graph reference)"
+            "Deterministic evidence supporting the finding (e.g. diff snippet or graph reference)"
         ),
     )

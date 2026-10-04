@@ -22,6 +22,4 @@ def baseline_command(
     ),
 ) -> None:
     """Generate an Implementation Baseline contract from the plan and codebase graph."""
-    typer.echo(
-        f"CodeAlign baseline: generating baseline at '{output}' (placeholder)."
-    )
+    typer.echo(f"CodeAlign baseline: generating baseline at '{output}' (placeholder).")
