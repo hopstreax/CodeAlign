@@ -8,10 +8,12 @@ from codealign.commands import (
     baseline_command,
     context_command,
     explain_command,
+    implement_command,
     init_command,
     status_command,
     verify_command,
 )
+
 
 app = typer.Typer(
     name="codealign",
@@ -75,6 +77,11 @@ app.command(
     name="explain",
     help="Explain verification findings and provide evidence-backed guidance for resolution.",
 )(explain_command)
+
+app.command(
+    name="implement",
+    help="Hand off implementation baseline to Gemini CLI and verify resulting changes.",
+)(implement_command)
 
 
 if __name__ == "__main__":

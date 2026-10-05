@@ -22,6 +22,7 @@ def test_cli_help() -> None:
         "status",
         "context",
         "explain",
+        "implement",
     ]
     for cmd in expected_commands:
         assert cmd in result.stdout
@@ -44,6 +45,7 @@ def test_cli_version() -> None:
         "status",
         "context",
         "explain",
+        "implement",
     ],
 )
 def test_subcommand_help(command: str) -> None:
@@ -82,3 +84,7 @@ def test_subcommand_placeholders() -> None:
     result_explain = runner.invoke(app, ["explain"])
     assert result_explain.exit_code == 0
     assert "CodeAlign explain" in result_explain.stdout
+
+    result_implement_help = runner.invoke(app, ["implement", "--help"])
+    assert result_implement_help.exit_code == 0
+    assert "Usage: codealign implement" in result_implement_help.stdout
