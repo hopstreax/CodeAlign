@@ -142,6 +142,39 @@ codealign context
 codealign context --stdout
 ```
 
+### Agent Handoff Boundary
+
+CodeAlign is strictly agent-agnostic. It does not embed an LLM or execute proprietary coding agents. Instead, it provides a clean, trusted boundary for any external agent or developer:
+
+1. **File Handoff (Workspace & IDE Agents):**
+   Workspace agents (such as Claude Code, Cursor Composer, or OpenCode) directly consume the generated context file:
+   ```bash
+   # In Cursor Composer or chat:
+   @.codealign/context.md
+
+   # In Claude Code:
+   claude "Implement the task described in .codealign/context.md"
+   ```
+
+2. **Stream Handoff (Unix Pipelines & CLI Tools):**
+   Pipe deterministic context directly into stdin:
+   ```bash
+   codealign context --stdout | my-coding-agent
+   ```
+
+3. **Programmatic Python API:**
+   External tools or harnesses can consume the canonical handoff contract directly:
+   ```python
+   from codealign.handoff import prepare_agent_handoff
+
+   handoff = prepare_agent_handoff(repo_root)
+   print(handoff.intent.goal)
+   print(handoff.context_markdown)
+   ```
+
+> **Division of Responsibility:** CodeAlign provides codebase-aware implementation context and constraints grounded in repository code intelligence. The external implementation agent remains solely responsible for reading source code, designing algorithms, writing code, and running tests.
+
+
 ---
 
 ## License

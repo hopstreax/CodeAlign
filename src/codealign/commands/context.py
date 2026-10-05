@@ -5,9 +5,8 @@ from pathlib import Path
 import typer
 
 from codealign.config import get_codealign_dir
-from codealign.context.exporter import export_agent_context
 from codealign.git.repository import GitError, NotAGitRepositoryError, get_git_repo_info
-from codealign.models.baseline import ImplementationBaseline
+from codealign.handoff import BaselineNotFoundError, prepare_agent_handoff
 
 
 def context_command(
@@ -47,26 +46,18 @@ def context_command(
         )
         raise typer.Exit(code=1)
 
-    # 2. Locate baseline file
-    baseline_path = baseline if baseline is not None else (codealign_dir / "baseline.json")
-    if not baseline_path.is_file():
-        typer.secho(
-            f"Error: Baseline contract not found at '{baseline_path}'.\n"
-            "Run 'codealign baseline <plan.md>' first to generate the implementation baseline.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # 3. Load baseline contract
+    # 2. Prepare handoff payload using canonical handoff contract
     try:
-        bl = ImplementationBaseline.from_file(baseline_path)
+        handoff = prepare_agent_handoff(repo_info.root, baseline_path=baseline)
+    except BaselineNotFoundError as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
     except Exception as exc:
         typer.secho(f"Error loading baseline file: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    # 4. Generate agent context Markdown
-    context_md = export_agent_context(bl)
+    bl = handoff.baseline
+    context_md = handoff.context_markdown
 
     # 5. Determine target output path and write artifact
     target_output = output if output is not None else (codealign_dir / "context.md")
