@@ -23,7 +23,7 @@ class GitRepoInfo:
     is_dirty: bool
 
 
-def _run_git(args: list[str], cwd: Path | None = None) -> str:
+def run_git_command(args: list[str], cwd: Path | None = None) -> str:
     """Execute a git command and return stripped stdout."""
     try:
         result = subprocess.run(
@@ -42,6 +42,10 @@ def _run_git(args: list[str], cwd: Path | None = None) -> str:
         raise GitError(f"Git command failed (git {' '.join(args)}): {stderr}") from exc
     except FileNotFoundError as exc:
         raise GitError("Git executable ('git') was not found in PATH.") from exc
+
+
+# Backwards compatibility alias
+_run_git = run_git_command
 
 
 def get_git_repo_info(path: Path | None = None) -> GitRepoInfo:

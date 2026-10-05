@@ -73,7 +73,7 @@ CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligen
 | `codealign analyze` | Resolve plan references against repository code intelligence | **Available** |
 | `codealign baseline` | Generate the Implementation Baseline contract (`baseline.json`) | **Available** |
 | `codealign context` | Export agent-consumable Markdown implementation context (`context.md`) | **Available** |
-| `codealign verify` | Verify Git changes against the baseline and code graph | Planned |
+| `codealign verify` | Verify actual code changes against baseline contract and Git state | **Available** |
 | `codealign status` | View baseline and verification status | Planned |
 | `codealign explain` | Explain findings and provide evidence-backed guidance | Planned |
 
@@ -104,18 +104,18 @@ pip install -e ".[dev]"
 
 ### Basic CLI Workflow
 
-The core alignment workflow progresses in three deliberate stages:
+The core alignment workflow progresses in four deliberate stages:
 
 ```text
 codealign analyze <plan.md>   →  Resolve plan references against repository evidence
 codealign baseline <plan.md>  →  Produce canonical implementation contract (.codealign/baseline.json)
 codealign context             →  Export concise, agent-consumable context (.codealign/context.md)
+codealign verify              →  Verify Git changes against the baseline contract
 ```
 
 - **`baseline` is the canonical implementation contract:** It locks plan intent, repository identity (branch, commit), resolved/unresolved repository evidence, and explicit expectations into a machine-readable, deterministic schema.
 - **`context` packages that baseline for an implementation agent:** It transforms the baseline into concise, structured Markdown (`.codealign/context.md` or stdout) containing the intent, expected files, symbols, tests, evidence (callers, callees, relationships), and constraints.
-- **`context` does NOT perform new analysis:** It does not rerun Graphify, does not query LLMs, does not re-analyze the repository, and does not invent implementation steps or make engineering decisions.
-- **The coding agent remains responsible for implementation:** The context provides grounded boundaries, leaving actual coding and design execution to the agent.
+- **`verify` checks actual implementation against developer intent:** It compares actual Git changes (modified, created, deleted, and untracked files) against baseline expectations, producing deterministic evidence without using an LLM.
 
 ```bash
 codealign --help
@@ -140,6 +140,15 @@ codealign context
 
 # 7. Print implementation context directly to stdout (for piping into agent prompts)
 codealign context --stdout
+
+# 8. Verify implementation changes against the baseline
+codealign verify
+
+# 9. Verify in strict mode (fails on warnings)
+codealign verify --strict
+
+# 10. Output machine-readable verification findings in JSON
+codealign verify --format json
 ```
 
 ### Agent Handoff Boundary
@@ -173,6 +182,28 @@ CodeAlign is strictly agent-agnostic. It does not embed an LLM or execute propri
    ```
 
 > **Division of Responsibility:** CodeAlign provides codebase-aware implementation context and constraints grounded in repository code intelligence. The external implementation agent remains solely responsible for reading source code, designing algorithms, writing code, and running tests.
+
+---
+
+## Verification Semantics (`codealign verify`)
+
+`codealign verify` validates the actual implementation state against the trusted baseline contract:
+
+- **Repository Binding:** Confirms the repository name and ensures the baseline commit exists in Git history.
+- **Expected File Changes:**
+  - `modify`: Verifies that the expected file was modified relative to the baseline commit (`FAIL` if unchanged or deleted).
+  - `create`: Verifies that the file exists and is newly introduced (`FAIL` if missing).
+  - `unresolved`: Preserves uncertainty as a warning (`WARN`); does not guess developer intent.
+- **Scope Drift:** Identifies unexpected modified or added files outside baseline expectations (`WARN`).
+- **Expected Tests:** Confirms whether planned test files were created or modified (`FAIL` if missing).
+- **Expected Symbols:** Confirms presence of target symbols in modified files.
+- **Constraints:** Preserves natural-language constraints as items requiring manual review (`WARN`).
+
+### Exit Code Rules
+
+- **`0`**: Verification passed (`PASS`), or passed with warnings (`WARN` in standard mode).
+- **`1`**: Verification failed (`FAIL`), or warnings encountered when `--strict` is enabled.
+
 
 
 ---

@@ -5,6 +5,7 @@ from codealign.git.repository import (
     GitRepoInfo,
     NotAGitRepositoryError,
     get_git_repo_info,
+    run_git_command,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "GitRepoInfo",
     "NotAGitRepositoryError",
     "get_git_repo_info",
+    "run_git_command",
 ]
