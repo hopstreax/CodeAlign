@@ -172,3 +172,56 @@ def test_analyze_uninitialized_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     result = runner.invoke(app, ["analyze", str(plan_path)])
     assert result.exit_code == 1
     assert "Run 'codealign init' first" in result.output
+
+
+def test_analyze_command_escaped_underscores(
+    mock_repo_with_graph: tuple[Path, Path],
+) -> None:
+    """Verify codealign analyze resolves references with escaped underscores."""
+    repo_root, _ = mock_repo_with_graph
+    out_dir = repo_root / ".codealign" / "graphify-out"
+    graph_path = out_dir / "graph.json"
+    graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
+    graph_data["nodes"].extend(
+        [
+            {
+                "id": "f_repo",
+                "label": "repository.py",
+                "source_file": "src/codealign/git/repository.py",
+                "source_location": "L1",
+                "file_type": "code",
+            },
+            {
+                "id": "fn_get_repo_info",
+                "label": "get_git_repo_info()",
+                "source_file": "src/codealign/git/repository.py",
+                "source_location": "L47",
+                "file_type": "code",
+                "_callable": True,
+            },
+            {
+                "id": "f_test_git",
+                "label": "test_git.py",
+                "source_file": "tests/test_git.py",
+                "source_location": "L1",
+                "file_type": "code",
+            },
+        ]
+    )
+    graph_path.write_text(json.dumps(graph_data), encoding="utf-8")
+
+    plan_path = repo_root / "test-plan.md"
+    plan_path.write_text(
+        r"""# Improve Git Repository Detection
+1. Update `get\_git\_repo\_info()` in `src/codealign/git/repository.py`.
+2. Add tests for Git repository detection in `tests/test\_git.py`.
+""",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["analyze", str(plan_path)])
+    assert result.exit_code == 0
+    assert "RESOLVED REFERENCES (3)" in result.stdout
+    assert "src/codealign/git/repository.py:47" in result.stdout
+    assert "tests/test_git.py:1" in result.stdout
+    assert "UNRESOLVED REFERENCES" not in result.stdout

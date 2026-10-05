@@ -54,7 +54,8 @@ def _clean_token(token: str) -> str:
     t = token.strip(" \t\r\n`'\"")
     if t.endswith((".", ",", ":", ";", "!")):
         t = t[:-1].strip()
-    return t
+    return t.replace(r"\_", "_")
+
 
 
 def _classify_reference(raw: str) -> PlanReference | None:

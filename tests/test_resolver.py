@@ -142,3 +142,68 @@ def test_resolve_plan_unresolved_references() -> None:
     term = result.format_terminal()
     assert "UNRESOLVED REFERENCES" in term
     assert "ExistingClass.absentMethod()" in term
+
+
+def test_resolve_plan_escaped_underscores() -> None:
+    """Verify resolution of functions and files containing escaped underscores."""
+    graph_data = {
+        "nodes": [
+            {
+                "id": "f_repo",
+                "label": "repository.py",
+                "source_file": "src/codealign/git/repository.py",
+                "source_location": "L1",
+                "file_type": "code",
+            },
+            {
+                "id": "fn_get_repo_info",
+                "label": "get_git_repo_info()",
+                "source_file": "src/codealign/git/repository.py",
+                "source_location": "L47",
+                "file_type": "code",
+                "_callable": True,
+            },
+            {
+                "id": "f_test_git",
+                "label": "test_git.py",
+                "source_file": "tests/test_git.py",
+                "source_location": "L1",
+                "file_type": "code",
+            },
+        ],
+        "links": [],
+    }
+
+    index = GraphIndex.from_dict(graph_data)
+    plan_text = r"""# Improve Git Repository Detection
+1. Update `get\_git\_repo\_info()` in `src/codealign/git/repository.py`.
+2. Add tests in `tests/test\_git.py`.
+3. Also verify plain path tests/test\_git.py.
+"""
+    plan = parse_plan_text(plan_text)
+    result = resolve_plan(plan, index)
+
+    assert len(result.unresolved) == 0
+    assert len(result.resolved) == 3
+
+    resolved_symbols = {r.reference: r for r in result.resolved}
+
+    # Verify get_git_repo_info()
+    fn_hit = resolved_symbols[r"get\_git\_repo\_info()"]
+    assert fn_hit.symbol == "get_git_repo_info"
+    assert fn_hit.file_path == "src/codealign/git/repository.py"
+    assert fn_hit.line == 47
+
+    # Verify tests/test_git.py
+    file_hit = resolved_symbols[r"tests/test\_git.py"]
+    assert file_hit.kind == "file"
+    assert file_hit.file_path == "tests/test_git.py"
+
+    # Verify terminal output
+    term = result.format_terminal()
+    assert "RESOLVED REFERENCES (3)" in term
+    assert r"get\_git\_repo\_info()" in term
+    assert "src/codealign/git/repository.py:47" in term
+    assert r"tests/test\_git.py" in term
+    assert "tests/test_git.py" in term
+    assert "UNRESOLVED REFERENCES" not in term

@@ -60,3 +60,37 @@ def test_parse_plan_file(tmp_path: Path) -> None:
     assert len(plan.references) == 1
     assert plan.references[0].target == "src/app.py"
     assert plan.references[0].kind == "file"
+
+
+def test_parse_plan_escaped_underscores_code_spans() -> None:
+    """Verify escaped underscores in code spans are normalized without turning into slashes."""
+    content = r"""# Improve Git Detection
+1. Update `get\_git\_repo\_info()` in `src/codealign/git/repository.py`.
+2. Add tests in `tests/test\_git.py`.
+3. Check unescaped `get_git_repo_info()` and `tests/test_git.py`.
+"""
+    plan = parse_plan_text(content)
+    targets = {r.target: r for r in plan.references}
+
+    assert "get_git_repo_info()" in targets
+    assert targets["get_git_repo_info()"].kind == "symbol"
+    assert targets["get_git_repo_info()"].raw == r"get\_git\_repo\_info()"
+
+    assert "tests/test_git.py" in targets
+    assert targets["tests/test_git.py"].kind == "file"
+    assert targets["tests/test_git.py"].raw == r"tests/test\_git.py"
+
+    assert "src/codealign/git/repository.py" in targets
+    assert targets["src/codealign/git/repository.py"].kind == "file"
+
+
+def test_parse_plan_escaped_underscores_plain_text() -> None:
+    """Verify plain text file paths with escaped underscores are recognized as files."""
+    content = r"""# Plain Text Plan
+Please update tests/test\_git.py and verify against tests/test_git.py.
+"""
+    plan = parse_plan_text(content)
+    targets = {r.target: r for r in plan.references}
+
+    assert "tests/test_git.py" in targets
+    assert targets["tests/test_git.py"].kind == "file"

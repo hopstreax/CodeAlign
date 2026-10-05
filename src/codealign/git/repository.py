@@ -49,42 +49,39 @@ _run_git = run_git_command
 
 
 def get_git_repo_info(path: Path | None = None) -> GitRepoInfo:
-    """Discover Git repository details for the given path.
+    """Discover Git repository details for the given path."""
+    target = Path(path or ".").resolve()
 
-    Resolves:
-    - Repository root path
-    - Current branch name (or detached head indicator)
-    - HEAD commit SHA (or 'uncommitted' for empty repositories)
-    - Working tree cleanliness (dirty/clean)
-    """
-    target = path.resolve() if path else Path.cwd().resolve()
-
-    # 1. Discover repository root
-    root_str = _run_git(["rev-parse", "--show-toplevel"], cwd=target)
-    root = Path(root_str).resolve()
-
-    # 2. Discover current branch
-    branch = _run_git(["branch", "--show-current"], cwd=root)
-    if not branch:
-        try:
-            short_head = _run_git(["rev-parse", "--short", "HEAD"], cwd=root)
-            branch = f"detached:{short_head}"
-        except GitError:
-            branch = "main"
-
-    # 3. Discover HEAD commit SHA
     try:
-        head_sha = _run_git(["rev-parse", "HEAD"], cwd=root)
-    except GitError:
-        head_sha = "uncommitted"
+        repo_root = Path(
+            _run_git(
+                ["rev-parse", "--show-toplevel"],
+                cwd=target,
+            )
+        ).resolve()
+    except GitError as exc:
+        raise NotAGitRepositoryError(
+            f"Not a Git repository: {target}"
+        ) from exc
 
-    # 4. Check whether working tree has changes
-    status_output = _run_git(["status", "--porcelain"], cwd=root)
-    is_dirty = bool(status_output.strip())
+    branch = _run_git(
+        ["branch", "--show-current"],
+        cwd=repo_root,
+    ) or "HEAD (detached)"
+
+    head_sha = _run_git(
+        ["rev-parse", "HEAD"],
+        cwd=repo_root,
+    )
+
+    status = _run_git(
+        ["status", "--porcelain"],
+        cwd=repo_root,
+    )
 
     return GitRepoInfo(
-        root=root,
+        root=repo_root,
         branch=branch,
         head_sha=head_sha,
-        is_dirty=is_dirty,
+        is_dirty=bool(status),
     )
