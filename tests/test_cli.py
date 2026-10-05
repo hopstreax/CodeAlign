@@ -79,9 +79,9 @@ def test_subcommand_placeholders() -> None:
     assert result_status.exit_code == 0
     assert "CodeAlign status" in result_status.stdout
 
-    result_context_json = runner.invoke(app, ["context", "--format", "json"])
-    assert result_context_json.exit_code == 0
-    assert '"baseline":' in result_context_json.stdout
+    result_context_help = runner.invoke(app, ["context", "--help"])
+    assert result_context_help.exit_code == 0
+    assert "Usage: codealign context" in result_context_help.stdout
 
     result_explain = runner.invoke(app, ["explain"])
     assert result_explain.exit_code == 0

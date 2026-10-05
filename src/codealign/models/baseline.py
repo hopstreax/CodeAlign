@@ -175,6 +175,15 @@ class ImplementationBaseline(BaseModel):
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_text(self.to_json(), encoding="utf-8")
 
+    @classmethod
+    def from_file(cls, path: Path) -> "ImplementationBaseline":
+        """Load and parse baseline contract from JSON file."""
+        if not path.is_file():
+            raise FileNotFoundError(f"Baseline file not found: {path}")
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return cls.model_validate(data)
+
     def format_terminal(self, output_path: str = ".codealign/baseline.json") -> str:
         """Format a clear, human-readable terminal summary report."""
         lines: list[str] = []

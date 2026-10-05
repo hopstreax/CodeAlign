@@ -72,9 +72,9 @@ CodeAlign uses [Graphify](https://github.com/...) as its initial code-intelligen
 | `codealign init` | Initialize `.codealign/` state and extract code intelligence | **Available** |
 | `codealign analyze` | Resolve plan references against repository code intelligence | **Available** |
 | `codealign baseline` | Generate the Implementation Baseline contract (`baseline.json`) | **Available** |
+| `codealign context` | Export agent-consumable Markdown implementation context (`context.md`) | **Available** |
 | `codealign verify` | Verify Git changes against the baseline and code graph | Planned |
 | `codealign status` | View baseline and verification status | Planned |
-| `codealign context` | Export agent-ready JSON/Markdown handoff context | Planned |
 | `codealign explain` | Explain findings and provide evidence-backed guidance | Planned |
 
 ---
@@ -102,7 +102,20 @@ source .venv/bin/activate  # Or on Windows: .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 ```
 
-### Basic CLI Usage
+### Basic CLI Workflow
+
+The core alignment workflow progresses in three deliberate stages:
+
+```text
+codealign analyze <plan.md>   →  Resolve plan references against repository evidence
+codealign baseline <plan.md>  →  Produce canonical implementation contract (.codealign/baseline.json)
+codealign context             →  Export concise, agent-consumable context (.codealign/context.md)
+```
+
+- **`baseline` is the canonical implementation contract:** It locks plan intent, repository identity (branch, commit), resolved/unresolved repository evidence, and explicit expectations into a machine-readable, deterministic schema.
+- **`context` packages that baseline for an implementation agent:** It transforms the baseline into concise, structured Markdown (`.codealign/context.md` or stdout) containing the intent, expected files, symbols, tests, evidence (callers, callees, relationships), and constraints.
+- **`context` does NOT perform new analysis:** It does not rerun Graphify, does not query LLMs, does not re-analyze the repository, and does not invent implementation steps or make engineering decisions.
+- **The coding agent remains responsible for implementation:** The context provides grounded boundaries, leaving actual coding and design execution to the agent.
 
 ```bash
 codealign --help
@@ -116,11 +129,17 @@ codealign analyze plan.md
 # 3. Output structured evidence in JSON
 codealign analyze plan.md --format json
 
-# 4. Generate the Implementation Baseline contract (.codealign/baseline.json)
+# 4. Generate the canonical Implementation Baseline contract (.codealign/baseline.json)
 codealign baseline plan.md
 
-# 5. Output baseline contract in JSON (for agent handoff)
+# 5. Output baseline contract in JSON
 codealign baseline plan.md --format json
+
+# 6. Export agent-consumable implementation context (.codealign/context.md)
+codealign context
+
+# 7. Print implementation context directly to stdout (for piping into agent prompts)
+codealign context --stdout
 ```
 
 ---
