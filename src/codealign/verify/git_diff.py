@@ -27,8 +27,11 @@ class GitChangeSet:
 
 
 def _normalize_path(p: str) -> str:
-    """Normalize file path to forward slashes."""
-    return p.strip().replace("\\", "/").lstrip("./")
+    """Normalize file path to forward slashes with no leading './'."""
+    norm = p.strip().replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm.lstrip("/")
 
 
 def get_git_changes(repo_root: Path, base_commit: str) -> GitChangeSet:

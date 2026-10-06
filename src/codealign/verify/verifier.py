@@ -1,17 +1,214 @@
 """Core implementation verification engine for CodeAlign."""
 
+import re
 from pathlib import Path
 
 from codealign.git.repository import GitRepoInfo
-from codealign.models.baseline import ImplementationBaseline
+from codealign.models.baseline import ExpectedSymbol, ImplementationBaseline
 from codealign.models.finding import Finding, FindingCategory, FindingSeverity
 from codealign.models.result import VerificationResult, VerificationStatus
 from codealign.verify.git_diff import BaseCommitNotFoundError, GitChangeSet, get_git_changes
 
+TEST_PATH_PATTERNS = (
+    r"^tests?/",
+    r"/tests?/",
+    r"test_",
+    r"_test\.[a-zA-Z0-9]+$",
+    r"\.test\.[a-zA-Z0-9]+$",
+    r"\.spec\.[a-zA-Z0-9]+$",
+)
+
 
 def _normalize_path(p: str) -> str:
-    """Normalize file path to forward slashes."""
-    return p.strip().replace("\\", "/").lstrip("./")
+    """Normalize file path to forward slashes with no leading './'."""
+    norm = p.strip().replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm.lstrip("/")
+
+
+def _is_codealign_artifact(path: str) -> bool:
+    """Check if path is inside .codealign/ workflow artifact directory."""
+    norm = _normalize_path(path)
+    parts = Path(norm).parts
+    return (
+        norm == ".codealign"
+        or norm.startswith(".codealign/")
+        or ".codealign" in parts
+    )
+
+
+def _is_plan_artifact(
+    path: str, plan_file: str | None, repo_root: Path | None = None
+) -> bool:
+    """Check if path is the plan input file used to generate the baseline."""
+    if not plan_file:
+        return False
+    norm_path = _normalize_path(path)
+    norm_plan = _normalize_path(plan_file)
+    if norm_path == norm_plan or norm_path.lower() == norm_plan.lower():
+        return True
+    if repo_root is not None:
+        try:
+            plan_p = Path(plan_file)
+            if not plan_p.is_absolute():
+                plan_p = repo_root / plan_p
+            resolved_repo = repo_root.resolve()
+            resolved_plan = plan_p.resolve()
+            if resolved_plan.is_relative_to(resolved_repo):
+                rel_plan = _normalize_path(str(resolved_plan.relative_to(resolved_repo)))
+                if norm_path == rel_plan or norm_path.lower() == rel_plan.lower():
+                    return True
+        except (ValueError, RuntimeError):
+            pass
+    return False
+
+
+def _is_python_runtime_artifact(path: str) -> bool:
+    """Check if path is a Python runtime artifact (__pycache__ or *.pyc/*.pyo)."""
+    norm = _normalize_path(path)
+    parts = Path(norm).parts
+    return norm.endswith(".pyc") or norm.endswith(".pyo") or "__pycache__" in parts
+
+
+def _is_test_path(path: str) -> bool:
+    """Check if a file path represents a test file."""
+    norm = _normalize_path(path)
+    return any(re.search(pat, norm, re.IGNORECASE) for pat in TEST_PATH_PATTERNS)
+
+
+def _is_symbol_defined_in_content(content: str, ident: str) -> bool:
+    """Check if symbol identifier appears to be defined in file content."""
+    def_patterns = [
+        # Python: def / async def / class
+        rf"\bdef\s+{re.escape(ident)}\b",
+        rf"\basync\s+def\s+{re.escape(ident)}\b",
+        rf"\bclass\s+{re.escape(ident)}\b",
+        # JS/TS: function / class / const / let / var
+        rf"\bfunction\s+{re.escape(ident)}\b",
+        rf"\bclass\s+{re.escape(ident)}\b",
+        rf"\b(?:const|let|var)\s+{re.escape(ident)}\s*=",
+        # TS/JS method: ident(...) { or ident(...) :
+        rf"^\s*(?:(?:public|private|protected|static|readonly|async)\s+)*{re.escape(ident)}\s*\([^)]*\)\s*(?:\{{|:)",
+        # Go: func ident / func (recv) ident
+        rf"\bfunc\s+(?:\([^)]+\)\s+)?{re.escape(ident)}\b",
+        # Rust: fn ident / struct ident / enum ident
+        rf"\bfn\s+{re.escape(ident)}\b",
+        rf"\bstruct\s+{re.escape(ident)}\b",
+        rf"\benum\s+{re.escape(ident)}\b",
+        # Generic assignment: ident = or ident: Type =
+        rf"\b{re.escape(ident)}\s*=",
+        rf"\b{re.escape(ident)}\s*:\s*[^=\n]+\s*=",
+    ]
+    for pat in def_patterns:
+        if re.search(pat, content, re.MULTILINE):
+            return True
+    return False
+
+
+def _find_created_symbol_in_repo(
+    exp_sym: ExpectedSymbol,
+    baseline: ImplementationBaseline,
+    repo_root: Path,
+) -> str | None:
+    """Re-check current repository to determine if an unresolved symbol now exists.
+
+    Returns:
+        The normalized relative path of the file where the symbol was found, or None.
+    """
+    clean_name = exp_sym.name.replace("\\", "").rstrip("()") or exp_sym.name
+    ident = clean_name.split(".")[-1].rstrip("()")
+    if not ident:
+        return None
+
+    # 1. If symbol has an explicit file_path, check it first
+    if exp_sym.file_path:
+        sym_file = _normalize_path(exp_sym.file_path)
+        target_path = repo_root / sym_file
+        if target_path.is_file():
+            content = target_path.read_text(encoding="utf-8", errors="ignore")
+            if _is_symbol_defined_in_content(content, ident) or re.search(
+                rf"\b{re.escape(ident)}\b", content
+            ):
+                return sym_file
+
+    # 2. Collect candidate expected files from baseline
+    expected_tests = {_normalize_path(t.path) for t in baseline.expectations.expected_tests}
+    seen: set[str] = set()
+    candidate_files: list[str] = []
+    for ef in baseline.expectations.expected_files:
+        if ef.action != "delete":
+            norm = _normalize_path(ef.path)
+            if norm and norm not in seen:
+                seen.add(norm)
+                candidate_files.append(norm)
+
+    # Separate into implementation files and test files
+    impl_files = [
+        f for f in candidate_files
+        if f not in expected_tests and not _is_test_path(f)
+    ]
+    test_files = [f for f in candidate_files if f not in impl_files]
+    for t in baseline.expectations.expected_tests:
+        tp = _normalize_path(t.path)
+        if tp not in seen:
+            seen.add(tp)
+            test_files.append(tp)
+
+    # Prioritize implementation files mentioned in intent steps or goal alongside the symbol
+    prioritized_impl: list[str] = []
+    other_impl: list[str] = []
+    intent_texts = baseline.intent.steps + [baseline.intent.goal, baseline.intent.title]
+    for f in impl_files:
+        filename = Path(f).name
+        mentioned = any(
+            ident.lower() in text.lower()
+            and (f.lower() in text.lower() or filename.lower() in text.lower())
+            for text in intent_texts
+        )
+        if mentioned:
+            prioritized_impl.append(f)
+        else:
+            other_impl.append(f)
+
+    ordered_impl = prioritized_impl + other_impl
+
+    # Pass 0: If class-qualified name, look for candidate where class also exists
+    if "." in clean_name:
+        class_name = clean_name.split(".")[0]
+        for f in ordered_impl:
+            target_path = repo_root / f
+            if target_path.is_file():
+                content = target_path.read_text(encoding="utf-8", errors="ignore")
+                if class_name in content and _is_symbol_defined_in_content(content, ident):
+                    return f
+
+    # Pass 1: Look for explicit symbol definition in candidate implementation files
+    for f in ordered_impl:
+        target_path = repo_root / f
+        if target_path.is_file():
+            content = target_path.read_text(encoding="utf-8", errors="ignore")
+            if _is_symbol_defined_in_content(content, ident):
+                return f
+
+    # Pass 2: Look for word boundary identifier presence in candidate implementation files
+    for f in ordered_impl:
+        target_path = repo_root / f
+        if target_path.is_file():
+            content = target_path.read_text(encoding="utf-8", errors="ignore")
+            if re.search(rf"\b{re.escape(ident)}\b", content):
+                return f
+
+    # Pass 3: Look for symbol definition in candidate test files (if plan intended test helpers)
+    for f in test_files:
+        target_path = repo_root / f
+        if target_path.is_file():
+            content = target_path.read_text(encoding="utf-8", errors="ignore")
+            if _is_symbol_defined_in_content(content, ident):
+                return f
+
+    return None
+
 
 
 def verify_implementation(
@@ -194,18 +391,25 @@ def verify_implementation(
 
     # 4. Scope Drift Verification (Unexpected Changed Files)
     for changed_file in sorted(changeset.all_changed_files):
-        if changed_file not in expected_file_paths:
-            findings.append(
-                Finding(
-                    category=FindingCategory.SCOPE_DRIFT,
-                    severity=FindingSeverity.WARN,
-                    message=f"Unexpected file changed: '{changed_file}'.",
-                    file_path=changed_file,
-                    expected="unchanged",
-                    actual="changed in working tree",
-                    evidence=f"File '{changed_file}' was changed but not declared in baseline",
-                )
+        if changed_file in expected_file_paths:
+            continue
+        if _is_codealign_artifact(changed_file):
+            continue
+        if _is_plan_artifact(changed_file, baseline.intent.plan_file, repo_root):
+            continue
+        if _is_python_runtime_artifact(changed_file):
+            continue
+        findings.append(
+            Finding(
+                category=FindingCategory.SCOPE_DRIFT,
+                severity=FindingSeverity.WARN,
+                message=f"Unexpected file changed: '{changed_file}'.",
+                file_path=changed_file,
+                expected="unchanged",
+                actual="changed in working tree",
+                evidence=f"File '{changed_file}' was changed but not declared in baseline",
             )
+        )
 
     # 5. Expected Tests Verification
     for exp_test in baseline.expectations.expected_tests:
@@ -238,19 +442,40 @@ def verify_implementation(
 
     # 6. Expected Symbols Verification
     for exp_sym in baseline.expectations.expected_symbols:
-        if exp_sym.status == "unresolved":
-            findings.append(
-                Finding(
-                    category=FindingCategory.UNRESOLVED_REFERENCE,
-                    severity=FindingSeverity.WARN,
-                    message=f"Baseline contains unresolved symbol reference: '{exp_sym.name}'.",
-                    symbol=exp_sym.name,
-                    file_path=exp_sym.file_path or None,
-                    expected="unresolved",
-                    actual="unconfirmed in codebase graph",
-                    evidence=exp_sym.reason or "Symbol was unconfirmed at baseline time",
-                )
+        if exp_sym.status in ("unresolved", "new"):
+            found_file = _find_created_symbol_in_repo(
+                exp_sym=exp_sym,
+                baseline=baseline,
+                repo_root=repo_root,
             )
+            if found_file:
+                clean_name = exp_sym.name.replace("\\", "").rstrip("()") or exp_sym.name
+                ident = clean_name.split(".")[-1].rstrip("()")
+                findings.append(
+                    Finding(
+                        category=FindingCategory.MISSING_IMPLEMENTATION,
+                        severity=FindingSeverity.PASS,
+                        message=f"Expected symbol '{clean_name}' created in '{found_file}'.",
+                        symbol=clean_name,
+                        file_path=found_file,
+                        expected="created",
+                        actual="created in file",
+                        evidence=f"Symbol identifier '{ident}' present in '{found_file}'",
+                    )
+                )
+            else:
+                findings.append(
+                    Finding(
+                        category=FindingCategory.UNRESOLVED_REFERENCE,
+                        severity=FindingSeverity.WARN,
+                        message=f"Baseline contains unresolved symbol reference: '{exp_sym.name}'.",
+                        symbol=exp_sym.name,
+                        file_path=exp_sym.file_path or None,
+                        expected="unresolved",
+                        actual="unconfirmed in codebase graph",
+                        evidence=exp_sym.reason or "Symbol was unconfirmed at baseline time",
+                    )
+                )
         elif exp_sym.status == "existing" and exp_sym.file_path:
             sym_file = _normalize_path(exp_sym.file_path)
             target_path = repo_root / sym_file
