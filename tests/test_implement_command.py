@@ -21,6 +21,7 @@ from codealign.models.baseline import (
 )
 from codealign.models.finding import Finding, FindingCategory, FindingSeverity
 from codealign.models.result import VerificationResult, VerificationStatus
+from codealign.verify.git_diff import GitChangeSet
 
 runner = CliRunner()
 
@@ -577,3 +578,173 @@ def test_implement_options_forwarded_to_antigravity(
     assert kwargs["dangerously_skip_permissions"] is True
     assert kwargs["model"] == "custom-model"
     assert kwargs["mode"] == "accept-edits"
+
+
+def test_implement_passes_session_changeset_to_verification(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """K. Verify implement passes computed session changeset into verify_implementation."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+    mock_run = MagicMock(return_value=GeminiResult(success=True, exit_code=0, stdout="Done"))
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+
+    captured_changeset = None
+
+    def fake_verify(**kwargs):
+        nonlocal captured_changeset
+        captured_changeset = kwargs.get("changeset")
+        return VerificationResult(status=VerificationStatus.PASS, summary="ok")
+
+    monkeypatch.setattr("codealign.commands.implement.verify_implementation", fake_verify)
+
+    result = runner.invoke(app, ["implement"])
+    assert result.exit_code == 0
+    assert captured_changeset is not None
+    assert isinstance(captured_changeset, GitChangeSet)
+
+
+def test_implement_session_terminal_output_renders_changes(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify SESSION CHANGES section is rendered in terminal output."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+    mock_run = MagicMock(
+        return_value=GeminiResult(success=True, exit_code=0, stdout="Created file")
+    )
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+
+    mock_session_cs = GitChangeSet(
+        base_commit="1234567890abcdef",
+        modified={"src/calculator.py"},
+        added={"tests/test_calculator.py"},
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.compute_session_changes",
+        lambda *args: mock_session_cs,
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement"])
+    assert result.exit_code == 0
+    assert "SESSION CHANGES" in result.stdout
+    assert "Modified:\n    src/calculator.py" in result.stdout
+    assert "Added:\n    tests/test_calculator.py" in result.stdout
+
+
+def test_implement_session_json_output_contains_session(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify session section is included in JSON output with sorted lists."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+    mock_run = MagicMock(return_value=GeminiResult(success=True, exit_code=0, stdout="Modified"))
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+
+    mock_session_cs = GitChangeSet(
+        base_commit="1234567890abcdef",
+        modified={"src/calculator.py"},
+        added={"new_file.py"},
+        deleted={"old_file.py"},
+        renamed={"b.py": "a.py"},
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.compute_session_changes",
+        lambda *args: mock_session_cs,
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement", "--format", "json"])
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert "session" in data
+    assert data["session"]["modified"] == ["src/calculator.py"]
+    assert data["session"]["added"] == ["new_file.py"]
+    assert data["session"]["deleted"] == ["old_file.py"]
+    assert data["session"]["renamed"] == {"b.py": "a.py"}
+
+
+def test_implement_session_captured_on_agent_failure(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify session changes are captured and included in JSON even when agent fails."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+    mock_run = MagicMock(
+        return_value=GeminiResult(success=False, exit_code=1, stderr="Syntax error")
+    )
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+
+    mock_session_cs = GitChangeSet(
+        base_commit="1234567890abcdef",
+        modified={"src/partial.py"},
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.compute_session_changes",
+        lambda *args: mock_session_cs,
+    )
+
+    result = runner.invoke(app, ["implement", "--format", "json"])
+    assert result.exit_code == 1
+    data = json.loads(result.stdout)
+    assert data["implementation"]["success"] is False
+    assert data["session"]["modified"] == ["src/partial.py"]
+
+
+def test_implement_session_excludes_preexisting_changes_from_scope_drift(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify pre-existing dirty files excluded from session do not produce scope drift."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+    mock_run = MagicMock(return_value=GeminiResult(success=True, exit_code=0, stdout="Done"))
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+
+    # Session only modified the expected calculator file; pre-existing notes.md was excluded
+    session_cs = GitChangeSet(
+        base_commit="1234567890abcdef",
+        modified={"src/calculator.py"},
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.compute_session_changes",
+        lambda *args: session_cs,
+    )
+
+    result = runner.invoke(app, ["implement"])
+    assert result.exit_code == 0
+    assert "Unexpected file changed" not in result.stdout
+    assert "notes.md" not in result.stdout
+
+
+def test_implement_session_filters_artifacts_from_scope_drift(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L. Verify workflow artifacts generated during session do not produce scope drift."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+    mock_run = MagicMock(return_value=GeminiResult(success=True, exit_code=0, stdout="Done"))
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+
+    # Session touched expected file PLUS workflow/runtime artifacts
+    session_cs = GitChangeSet(
+        base_commit="1234567890abcdef",
+        modified={"src/calculator.py", "plan.md", ".codealign/config.toml"},
+        added={"__pycache__/calc.cpython-312.pyc", "other.pyc"},
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.compute_session_changes",
+        lambda *args: session_cs,
+    )
+
+    result = runner.invoke(app, ["implement"])
+    assert result.exit_code == 0
+    assert "Unexpected file changed: 'plan.md'" not in result.stdout
+    assert "Unexpected file changed: '__pycache__/calc.cpython-312.pyc'" not in result.stdout
+    assert "Unexpected file changed: 'other.pyc'" not in result.stdout

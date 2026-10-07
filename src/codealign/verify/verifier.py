@@ -216,6 +216,7 @@ def verify_implementation(
     repo_root: Path,
     repo_info: GitRepoInfo | None = None,
     strict: bool = False,
+    changeset: GitChangeSet | None = None,
 ) -> VerificationResult:
     """Verify actual repository changes against the ImplementationBaseline contract.
 
@@ -224,6 +225,7 @@ def verify_implementation(
         repo_root: Path to repository root directory.
         repo_info: Optional GitRepoInfo for active repository.
         strict: If True, treat any warnings as verification failure.
+        changeset: Optional pre-computed GitChangeSet (e.g. from an implementation session).
 
     Returns:
         VerificationResult with deterministic status and structured findings.
@@ -249,25 +251,25 @@ def verify_implementation(
             )
 
     # 2. Extract Git Changes relative to baseline commit
-    changeset: GitChangeSet
-    try:
-        changeset = get_git_changes(repo_root, baseline.repository.commit)
-    except BaseCommitNotFoundError as exc:
-        findings.append(
-            Finding(
-                category=FindingCategory.REPOSITORY_BINDING,
-                severity=FindingSeverity.ERROR,
-                message=str(exc),
-                expected=baseline.repository.commit,
-                actual="commit not found in git history",
-                evidence="Cannot compare working tree against missing baseline commit",
+    if changeset is None:
+        try:
+            changeset = get_git_changes(repo_root, baseline.repository.commit)
+        except BaseCommitNotFoundError as exc:
+            findings.append(
+                Finding(
+                    category=FindingCategory.REPOSITORY_BINDING,
+                    severity=FindingSeverity.ERROR,
+                    message=str(exc),
+                    expected=baseline.repository.commit,
+                    actual="commit not found in git history",
+                    evidence="Cannot compare working tree against missing baseline commit",
+                )
             )
-        )
-        return VerificationResult(
-            status=VerificationStatus.FAIL,
-            summary="Verification failed: baseline commit not found in repository history",
-            findings=findings,
-        )
+            return VerificationResult(
+                status=VerificationStatus.FAIL,
+                summary="Verification failed: baseline commit not found in repository history",
+                findings=findings,
+            )
 
     # 3. Expected Files Verification
     expected_file_paths: set[str] = set()

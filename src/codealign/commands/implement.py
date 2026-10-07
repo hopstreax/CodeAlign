@@ -17,6 +17,11 @@ from codealign.git.repository import GitError, NotAGitRepositoryError, get_git_r
 from codealign.models.baseline import ImplementationBaseline
 from codealign.models.finding import FindingSeverity
 from codealign.models.result import VerificationResult, VerificationStatus
+from codealign.verify.git_diff import (
+    GitChangeSet,
+    capture_working_tree_snapshot,
+    compute_session_changes,
+)
 from codealign.verify.verifier import verify_implementation
 
 
@@ -25,6 +30,42 @@ class OutputFormat(str, Enum):
 
     TERMINAL = "terminal"
     JSON = "json"
+
+
+def _format_session_changes_terminal(cs: GitChangeSet) -> str:
+    """Format session changes for human-readable terminal display."""
+    lines: list[str] = ["SESSION CHANGES"]
+    has_changes = False
+
+    if cs.modified:
+        has_changes = True
+        lines.append("  Modified:")
+        for p in sorted(cs.modified):
+            lines.append(f"    {p}")
+
+    if cs.added:
+        has_changes = True
+        lines.append("  Added:")
+        for p in sorted(cs.added):
+            lines.append(f"    {p}")
+
+    if cs.deleted:
+        has_changes = True
+        lines.append("  Deleted:")
+        for p in sorted(cs.deleted):
+            lines.append(f"    {p}")
+
+    if cs.renamed:
+        has_changes = True
+        lines.append("  Renamed:")
+        for new_p, old_p in sorted(cs.renamed.items()):
+            lines.append(f"    {new_p} (from {old_p})")
+
+    if not has_changes:
+        lines.append("  No changes detected during session.")
+
+    return "\n".join(lines)
+
 
 
 def _format_verification_terminal(result: VerificationResult, bl: ImplementationBaseline) -> str:
@@ -218,6 +259,11 @@ def implement_command(
             f"Invoking {agent_display_name} CLI to implement changes for '{bl.intent.title}'..."
         )
 
+    # Capture pre-agent working tree snapshot
+    pre_snapshot = capture_working_tree_snapshot(repo_info.root, bl.repository.commit)
+
+    agent_result = None
+    exec_exc = None
     try:
         if normalized_agent == "gemini":
             agent_result = agent_runner.run(
@@ -237,8 +283,19 @@ def implement_command(
                 model=model,
             )
     except (GeminiExecutionError, AntigravityExecutionError) as exc:
+        exec_exc = exc
+
+    # Capture post-agent working tree snapshot and compute session changes
+    post_snapshot = capture_working_tree_snapshot(repo_info.root, bl.repository.commit)
+    session_changeset = compute_session_changes(
+        pre_snapshot,
+        post_snapshot,
+        repo_info.root,
+    )
+
+    if exec_exc is not None:
         typer.secho(
-            f"Error executing {agent_display_name} CLI: {exc}",
+            f"Error executing {agent_display_name} CLI: {exec_exc}",
             fg=typer.colors.RED,
             err=True,
         )
@@ -249,6 +306,7 @@ def implement_command(
         if format == OutputFormat.JSON:
             payload = {
                 "agent": normalized_agent,
+                "session": session_changeset.to_dict(),
                 "implementation": agent_result.to_dict(),
                 "verification": None,
             }
@@ -265,6 +323,9 @@ def implement_command(
                 lines.append(f"\nError Output:\n{agent_result.stderr.strip()}")
             elif agent_result.stdout:
                 lines.append(f"\nOutput:\n{agent_result.stdout.strip()}")
+            if session_changeset.all_changed_files:
+                lines.append("")
+                lines.append(_format_session_changes_terminal(session_changeset))
             typer.echo("\n".join(lines).strip())
         raise typer.Exit(code=1)
 
@@ -280,12 +341,14 @@ def implement_command(
         repo_root=repo_info.root,
         repo_info=repo_info,
         strict=strict,
+        changeset=session_changeset,
     )
 
     # 8. Report both results
     if format == OutputFormat.JSON:
         payload = {
             "agent": normalized_agent,
+            "session": session_changeset.to_dict(),
             "implementation": agent_result.to_dict(),
             "verification": verification_result.to_dict(),
         }
@@ -304,6 +367,9 @@ def implement_command(
         if agent_result.stdout.strip():
             impl_section.append(f"\nOutput:\n{agent_result.stdout.strip()}")
         report_sections.append("\n".join(impl_section))
+
+        # Session changes section
+        report_sections.append(_format_session_changes_terminal(session_changeset))
 
         # Verification section
         verify_str = _format_verification_terminal(verification_result, bl)

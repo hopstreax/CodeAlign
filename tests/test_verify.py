@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from codealign.cli import app
@@ -20,7 +21,12 @@ from codealign.models.baseline import (
 )
 from codealign.models.finding import FindingCategory, FindingSeverity
 from codealign.models.result import VerificationStatus
-from codealign.verify.git_diff import GitChangeSet
+from codealign.verify.git_diff import (
+    GitChangeSet,
+    WorkingTreeSnapshot,
+    capture_working_tree_snapshot,
+    compute_session_changes,
+)
 from codealign.verify.verifier import verify_implementation
 
 runner = CliRunner()
@@ -907,3 +913,203 @@ def test_verify_existing_symbol_continues_to_pass(
     add_passes = [f for f in result.passes if f.symbol == "add"]
     assert len(add_passes) == 1
     assert add_passes[0].message == "Expected symbol 'add' confirmed in 'src/calculator.py'."
+
+
+def test_session_clean_repo_modifies_file() -> None:
+    """A. Clean repo: agent modifies file -> session contains it."""
+    pre = WorkingTreeSnapshot(changeset=GitChangeSet(base_commit="c1"))
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calc.py"}),
+        dirty_hashes={"src/calc.py": "hash_new"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.modified == {"src/calc.py"}
+    assert session.added == set()
+    assert session.deleted == set()
+
+
+def test_session_clean_repo_creates_file() -> None:
+    """B. Clean repo: agent creates file -> session contains it."""
+    pre = WorkingTreeSnapshot(changeset=GitChangeSet(base_commit="c1"))
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", added={"src/new.py"}),
+        dirty_hashes={"src/new.py": "hash_new"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.added == {"src/new.py"}
+    assert session.modified == set()
+
+
+def test_session_clean_repo_deletes_file() -> None:
+    """C. Clean repo: agent deletes file -> session contains it."""
+    pre = WorkingTreeSnapshot(changeset=GitChangeSet(base_commit="c1"))
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", deleted={"src/old.py"}),
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.deleted == {"src/old.py"}
+
+
+def test_session_clean_repo_renames_file() -> None:
+    """Clean repo: agent renames file -> session contains rename and modified."""
+    pre = WorkingTreeSnapshot(changeset=GitChangeSet(base_commit="c1"))
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(
+            base_commit="c1",
+            modified={"src/new_name.py"},
+            renamed={"src/new_name.py": "src/old_name.py"},
+        ),
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.renamed == {"src/new_name.py": "src/old_name.py"}
+    assert "src/new_name.py" in session.modified
+
+
+def test_session_preexisting_modified_file_untouched() -> None:
+    """D. Pre-existing modified file untouched -> excluded from session."""
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/dirty.py"}),
+        dirty_hashes={"src/dirty.py": "hash_dirty"},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(
+            base_commit="c1",
+            modified={"src/dirty.py", "src/agent.py"},
+        ),
+        dirty_hashes={"src/dirty.py": "hash_dirty", "src/agent.py": "hash_agent"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.modified == {"src/agent.py"}
+    assert "src/dirty.py" not in session.all_changed_files
+
+
+def test_session_preexisting_untracked_file_untouched() -> None:
+    """E. Pre-existing untracked file untouched -> excluded from session."""
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", added={"temp.txt"}),
+        dirty_hashes={"temp.txt": "hash_temp"},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(
+            base_commit="c1",
+            added={"temp.txt", "src/new.py"},
+        ),
+        dirty_hashes={"temp.txt": "hash_temp", "src/new.py": "hash_new"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.added == {"src/new.py"}
+    assert "temp.txt" not in session.all_changed_files
+
+
+def test_session_preexisting_modified_file_changed() -> None:
+    """F. Pre-existing modified file changed by agent -> included in session."""
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calc.py"}),
+        dirty_hashes={"src/calc.py": "hash_v1"},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calc.py"}),
+        dirty_hashes={"src/calc.py": "hash_v2"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.modified == {"src/calc.py"}
+
+
+def test_session_preexisting_untracked_file_changed() -> None:
+    """G. Pre-existing untracked file changed by agent -> included in session."""
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", added={"scratch.py"}),
+        dirty_hashes={"scratch.py": "hash_v1"},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", added={"scratch.py"}),
+        dirty_hashes={"scratch.py": "hash_v2"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.modified == {"scratch.py"}
+    assert session.added == set()
+
+
+def test_session_preexisting_dirty_file_restored() -> None:
+    """H. Pre-existing dirty file restored to HEAD -> handled without crash."""
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/reverted.py"}),
+        dirty_hashes={"src/reverted.py": "hash_dirty"},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        dirty_hashes={},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.modified == {"src/reverted.py"}
+
+
+def test_session_agent_makes_no_changes() -> None:
+    """I. Agent makes no changes -> empty session."""
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/dirty.py"}),
+        dirty_hashes={"src/dirty.py": "hash_dirty"},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/dirty.py"}),
+        dirty_hashes={"src/dirty.py": "hash_dirty"},
+    )
+    session = compute_session_changes(pre, post, Path("/repo"))
+    assert session.all_changed_files == set()
+
+
+def test_verify_standalone_calculates_own_changeset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J. Standalone verify_implementation calculates its own changeset when changeset=None."""
+    baseline = _make_sample_baseline(commit="c1", repo_name="calc_repo")
+    repo_info = GitRepoInfo(root=tmp_path, branch="main", head_sha="c1", is_dirty=False)
+
+    called = False
+
+    def fake_get_git_changes(repo_root, base_commit):
+        nonlocal called
+        called = True
+        return GitChangeSet(base_commit="c1")
+
+    monkeypatch.setattr("codealign.verify.verifier.get_git_changes", fake_get_git_changes)
+    result = verify_implementation(baseline, tmp_path, repo_info=repo_info, changeset=None)
+    assert called is True
+    assert result.status is not None
+
+
+def test_verify_with_supplied_changeset_skips_get_git_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """verify_implementation uses supplied changeset and skips get_git_changes."""
+    baseline = _make_sample_baseline(commit="c1", repo_name="calc_repo")
+    repo_info = GitRepoInfo(root=tmp_path, branch="main", head_sha="c1", is_dirty=False)
+
+    called = False
+
+    def fake_get_git_changes(repo_root, base_commit):
+        nonlocal called
+        called = True
+        return GitChangeSet(base_commit="c1")
+
+    monkeypatch.setattr("codealign.verify.verifier.get_git_changes", fake_get_git_changes)
+    custom_cs = GitChangeSet(base_commit="c1", modified={"src/services/UserService.ts"})
+    result = verify_implementation(baseline, tmp_path, repo_info=repo_info, changeset=custom_cs)
+    assert called is False
+    assert result.status is not None
+
+
+def test_capture_working_tree_snapshot_hashes_dirty_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """capture_working_tree_snapshot hashes dirty files reported by get_git_changes."""
+    f = tmp_path / "foo.py"
+    f.write_text("print('hello')", encoding="utf-8")
+
+    def fake_get_git_changes(repo_root, base_commit):
+        return GitChangeSet(base_commit="c1", modified={"foo.py"})
+
+    monkeypatch.setattr("codealign.verify.git_diff.get_git_changes", fake_get_git_changes)
+    snapshot = capture_working_tree_snapshot(tmp_path, "c1")
+    expected_hash = hashlib.sha256("print('hello')".encode("utf-8")).hexdigest()
+    assert snapshot.dirty_hashes.get("foo.py") == expected_hash
