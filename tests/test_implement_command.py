@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 from typer.testing import CliRunner
 
+from codealign.agent.antigravity import AntigravityResult
 from codealign.agent.gemini import GeminiResult
 from codealign.cli import app
 from codealign.git.repository import GitRepoInfo, NotAGitRepositoryError
@@ -382,3 +383,197 @@ def test_implement_options_forwarded_to_gemini(
     assert kwargs["approval_mode"] == "plan"
     assert kwargs["yolo"] is True
     assert kwargs["model"] == "gemini-2.5-pro"
+
+
+def test_implement_missing_antigravity_cli(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify implement fails clearly when Antigravity CLI is not available on PATH."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: False)
+
+    result = runner.invoke(app, ["implement", "--agent", "antigravity"])
+    assert result.exit_code == 1
+    assert "Error: Antigravity CLI ('agy' or 'antigravity') not found on PATH" in result.output
+    assert "Please install and configure Antigravity CLI" in result.output
+
+
+def test_implement_antigravity_success_proceeds_to_verification_pass(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify successful Antigravity execution proceeds to verification and passes cleanly."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=AntigravityResult(
+            success=True,
+            exit_code=0,
+            stdout="Created subtract() in src/calculator.py",
+            stderr="",
+        )
+    )
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.run", mock_run)
+
+    mock_verify_result = VerificationResult(
+        status=VerificationStatus.PASS,
+        summary="1 pass, 0 warnings, 0 failures",
+        findings=[
+            Finding(
+                category=FindingCategory.MISSING_IMPLEMENTATION,
+                severity=FindingSeverity.PASS,
+                message="Expected file 'src/calculator.py' was modified.",
+                file_path="src/calculator.py",
+                expected="modify",
+                actual="modified",
+                evidence="File modified in working tree",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: mock_verify_result,
+    )
+
+    result = runner.invoke(app, ["implement", "--agent", "antigravity"])
+    assert result.exit_code == 0
+
+    # Both Antigravity result and verification result reported
+    assert "ANTIGRAVITY IMPLEMENTATION" in result.stdout
+    assert "Agent: antigravity" in result.stdout
+    assert "Status: SUCCESS (exit code 0)" in result.stdout
+    assert "Created subtract() in src/calculator.py" in result.stdout
+
+    assert "CODEALIGN VERIFICATION" in result.stdout
+    assert "Result:\n  PASS" in result.stdout
+    assert "[OK] Expected file 'src/calculator.py' was modified." in result.stdout
+
+
+def test_implement_agy_alias(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify --agent agy alias normalizes to antigravity and executes AntigravityAgent."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=AntigravityResult(
+            success=True,
+            exit_code=0,
+            stdout="Created subtract() in src/calculator.py",
+            stderr="",
+        )
+    )
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.run", mock_run)
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement", "--agent", "agy"])
+    assert result.exit_code == 0
+    assert "ANTIGRAVITY IMPLEMENTATION" in result.stdout
+    assert "Agent: antigravity" in result.stdout
+    mock_run.assert_called_once()
+
+
+def test_implement_antigravity_subprocess_failure(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Antigravity failure surfaces error and stops before running verification."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=AntigravityResult(
+            success=False,
+            exit_code=1,
+            stdout="",
+            stderr="Permission error encountered.",
+        )
+    )
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.run", mock_run)
+
+    mock_verify = MagicMock()
+    monkeypatch.setattr("codealign.commands.implement.verify_implementation", mock_verify)
+
+    result = runner.invoke(app, ["implement", "--agent", "antigravity"])
+    assert result.exit_code == 1
+    assert "ANTIGRAVITY IMPLEMENTATION" in result.stdout
+    assert "Agent: antigravity" in result.stdout
+    assert "Status: FAILED (exit code 1)" in result.stdout
+    assert "Permission error encountered." in result.stdout
+
+    # Verification must NOT run if Antigravity fails
+    mock_verify.assert_not_called()
+
+
+def test_implement_antigravity_json_format(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify --format json outputs structured JSON with antigravity agent key."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=AntigravityResult(
+            success=True,
+            exit_code=0,
+            stdout="Modified files.",
+            stderr="",
+        )
+    )
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.run", mock_run)
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement", "--agent", "antigravity", "--format", "json"])
+    assert result.exit_code == 0
+
+    data = json.loads(result.stdout)
+    assert data["agent"] == "antigravity"
+    assert data["implementation"]["success"] is True
+    assert data["implementation"]["exit_code"] == 0
+    assert data["implementation"]["stdout"] == "Modified files."
+    assert data["verification"]["status"] == "pass"
+
+
+def test_implement_options_forwarded_to_antigravity(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify options --dangerously-skip-permissions, --model are passed to Antigravity."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=AntigravityResult(
+            success=True,
+            exit_code=0,
+        )
+    )
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.run", mock_run)
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "implement",
+            "--agent",
+            "antigravity",
+            "--dangerously-skip-permissions",
+            "--model",
+            "custom-model",
+        ],
+    )
+    assert result.exit_code == 0
+
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs["dangerously_skip_permissions"] is True
+    assert kwargs["model"] == "custom-model"
+    assert kwargs["mode"] == "accept-edits"
