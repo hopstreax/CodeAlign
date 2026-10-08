@@ -1,9 +1,11 @@
 """Git diff and working tree change inspection for verification."""
 
+import ast
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from codealign.git.repository import GitError, run_git_command
 
@@ -39,10 +41,11 @@ class GitChangeSet:
 
 @dataclass(frozen=True)
 class WorkingTreeSnapshot:
-    """Deterministic snapshot of repository working-tree state and dirty file hashes."""
+    """Deterministic snapshot of repository working-tree state, dirty hashes, and symbols."""
 
     changeset: GitChangeSet
     dirty_hashes: dict[str, str] = field(default_factory=dict)
+    file_symbols: dict[str, set[str]] = field(default_factory=dict)
 
 
 
@@ -159,10 +162,81 @@ def _hash_file(path: Path) -> str | None:
         return None
 
 
-def capture_working_tree_snapshot(repo_root: Path, base_commit: str) -> WorkingTreeSnapshot:
-    """Capture snapshot of repository working-tree state and hashes of dirty files.
+def _extract_python_symbols(content: str) -> set[str]:
+    """Extract functions, async functions, classes, and methods from Python source."""
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return set()
+
+    symbols: set[str] = set()
+
+    def _walk_class(class_node: ast.ClassDef, prefix: str) -> None:
+        for item in class_node.body:
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                symbols.add(f"{prefix}.{item.name}")
+            elif isinstance(item, ast.ClassDef):
+                symbols.add(f"{prefix}.{item.name}")
+                _walk_class(item, f"{prefix}.{item.name}")
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            symbols.add(node.name)
+        elif isinstance(node, ast.ClassDef):
+            symbols.add(node.name)
+            _walk_class(node, node.name)
+
+    return symbols
+
+
+_GENERIC_CALLABLE_PATTERNS = [
+    re.compile(r"\bfunction\s+([A-Za-z0-9_$]+)"),
+    re.compile(r"\bclass\s+([A-Za-z0-9_$]+)"),
+    re.compile(r"\bfunc\s+(?:\([^)]+\)\s+)?([A-Za-z0-9_]+)"),
+    re.compile(r"\bfn\s+([A-Za-z0-9_]+)"),
+    re.compile(r"\bstruct\s+([A-Za-z0-9_]+)"),
+    re.compile(r"\benum\s+([A-Za-z0-9_]+)"),
+    re.compile(
+        r"^\s*(?:(?:public|private|protected|static|readonly|async)\s+)+([A-Za-z0-9_$]+)\s*\([^)]*\)\s*(?:\{|:)",
+        re.MULTILINE,
+    ),
+]
+
+
+def _extract_generic_symbols(content: str) -> set[str]:
+    """Extract functions, classes, and methods from non-Python source using regex."""
+    symbols: set[str] = set()
+    for pattern in _GENERIC_CALLABLE_PATTERNS:
+        for match in pattern.finditer(content):
+            name = match.group(1).strip()
+            if name:
+                symbols.add(name)
+    return symbols
+
+
+def extract_file_symbols(path: Path) -> set[str]:
+    """Extract callable and class symbol names defined in a file."""
+    if not path.is_file():
+        return set()
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return set()
+
+    if path.suffix == ".py":
+        return _extract_python_symbols(content)
+    return _extract_generic_symbols(content)
+
+
+def capture_working_tree_snapshot(
+    repo_root: Path,
+    base_commit: str,
+    relevant_files: Iterable[str] | None = None,
+) -> WorkingTreeSnapshot:
+    """Capture snapshot of repository working-tree state, dirty hashes, and symbols.
 
     Reuses get_git_changes() and only hashes files present in the resulting changeset.
+    Extracts symbols for dirty files and any explicitly passed relevant files.
     """
     try:
         changeset = get_git_changes(repo_root, base_commit)
@@ -175,7 +249,23 @@ def capture_working_tree_snapshot(repo_root: Path, base_commit: str) -> WorkingT
         h = _hash_file(full_path)
         if h is not None:
             dirty_hashes[file_path] = h
-    return WorkingTreeSnapshot(changeset=changeset, dirty_hashes=dirty_hashes)
+
+    files_to_scan = set(changeset.all_changed_files)
+    if relevant_files:
+        files_to_scan.update(_normalize_path(f) for f in relevant_files)
+
+    file_symbols: dict[str, set[str]] = {}
+    for file_path in sorted(files_to_scan):
+        full_path = repo_root / file_path
+        if full_path.is_file():
+            syms = extract_file_symbols(full_path)
+            file_symbols[file_path] = syms
+
+    return WorkingTreeSnapshot(
+        changeset=changeset,
+        dirty_hashes=dirty_hashes,
+        file_symbols=file_symbols,
+    )
 
 
 def compute_session_changes(

@@ -26,6 +26,7 @@ from codealign.verify.git_diff import (
     WorkingTreeSnapshot,
     capture_working_tree_snapshot,
     compute_session_changes,
+    extract_file_symbols,
 )
 from codealign.verify.verifier import verify_implementation
 
@@ -1113,3 +1114,434 @@ def test_capture_working_tree_snapshot_hashes_dirty_files(
     snapshot = capture_working_tree_snapshot(tmp_path, "c1")
     expected_hash = hashlib.sha256("print('hello')".encode("utf-8")).hexdigest()
     assert snapshot.dirty_hashes.get("foo.py") == expected_hash
+
+
+def test_extract_file_symbols_python(tmp_path: Path) -> None:
+    """extract_file_symbols extracts top-level and class functions/classes."""
+    code = """
+import os
+MY_CONST = 100
+
+def top_func(x):
+    def inner_closure():
+        return x
+    return inner_closure()
+
+async def async_top():
+    pass
+
+class Calculator:
+    def add(self):
+        pass
+
+    async def async_compute(self):
+        pass
+
+    def _private_method(self):
+        pass
+
+class _PrivateClass:
+    def run(self):
+        pass
+"""
+    f = tmp_path / "calc.py"
+    f.write_text(code, encoding="utf-8")
+    symbols = extract_file_symbols(f)
+    assert "top_func" in symbols
+    assert "async_top" in symbols
+    assert "Calculator" in symbols
+    assert "Calculator.add" in symbols
+    assert "Calculator.async_compute" in symbols
+    assert "Calculator._private_method" in symbols
+    assert "_PrivateClass" in symbols
+    assert "_PrivateClass.run" in symbols
+    # Inner closures and constants/imports must not be present
+    assert "inner_closure" not in symbols
+    assert "MY_CONST" not in symbols
+    assert "os" not in symbols
+
+
+def test_extract_file_symbols_generic(tmp_path: Path) -> None:
+    """extract_file_symbols extracts functions and classes from non-Python files using regex."""
+    code = """
+export function runTask() {}
+export class TaskManager {}
+const value = 42;
+"""
+    f = tmp_path / "tasks.ts"
+    f.write_text(code, encoding="utf-8")
+    symbols = extract_file_symbols(f)
+    assert "runTask" in symbols
+    assert "TaskManager" in symbols
+    assert "value" not in symbols
+
+
+def _make_symbol_drift_baseline(tmp_path: Path) -> tuple[ImplementationBaseline, GitRepoInfo]:
+    calc_path = tmp_path / "src" / "calculator.py"
+    calc_path.parent.mkdir(parents=True, exist_ok=True)
+    calc_path.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    baseline = ImplementationBaseline(
+        schema_version="0.1.0",
+        repository=BaselineRepositoryInfo(name=tmp_path.name, commit="c1"),
+        intent=BaselineIntent(title="Add multiply", goal="Multiply feature"),
+        expectations=BaselineExpectations(
+            expected_files=[
+                ExpectedFile(path="src/calculator.py", action="modify", status="resolved")
+            ],
+            expected_symbols=[
+                ExpectedSymbol(name="multiply", kind="function", status="unresolved")
+            ],
+        ),
+    )
+    repo_info = GitRepoInfo(root=tmp_path, branch="main", head_sha="c1", is_dirty=False)
+    return baseline, repo_info
+
+
+def test_symbol_drift_t1_expected_multiply_passes(tmp_path: Path) -> None:
+    """T1: Clean file + expected multiply() introduced by agent -> PASS, 0 drift warnings."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\ndef multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": {"add"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "multiply"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.PASS
+    drift_findings = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift_findings) == 0
+
+
+def test_symbol_drift_t2_expected_multiply_plus_unexpected_divide(tmp_path: Path) -> None:
+    """T2: Expected multiply() + agent adds divide() -> PASS for multiply + WARN for divide."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def multiply(a, b):\n    return a * b\n"
+        "def divide(a, b):\n    return a / b\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": {"add"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "multiply", "divide"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].symbol == "divide"
+    assert drift[0].severity == FindingSeverity.WARN
+    assert "Unexpected symbol 'divide' introduced in 'src/calculator.py'" in drift[0].message
+    assert "Symbol 'divide' was not present in pre-session file" in drift[0].evidence
+
+
+def test_symbol_drift_t3_private_helper_ignored(tmp_path: Path) -> None:
+    """T3: Expected multiply() + agent adds private _validate_args() -> no drift warning."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def _validate_args(a, b):\n    pass\n"
+        "def multiply(a, b):\n    _validate_args(a, b)\n    return a * b\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": {"add"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "multiply", "_validate_args"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.PASS
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0
+
+
+def test_symbol_drift_t4_unexpected_class_utils(tmp_path: Path) -> None:
+    """T4: Expected multiply() + agent adds Utils class -> WARN for Utils."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def multiply(a, b):\n    return a * b\n"
+        "class Utils:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": {"add"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "multiply", "Utils"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].symbol == "Utils"
+
+
+def test_symbol_drift_t5_preexisting_dirty_symbol_not_flagged(tmp_path: Path) -> None:
+    """T5: Pre-session dirty file already contains draft() -> draft() produces NO drift warning."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def draft(a):\n    pass\n"
+        "def multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "draft"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "draft", "multiply"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.PASS
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0
+
+
+def test_symbol_drift_t6_preexisting_dirty_symbol_removed(tmp_path: Path) -> None:
+    """T6: Pre-session dirty symbol removed during session -> no false warning, no crash."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "old_draft"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"add", "multiply"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.PASS
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0
+
+
+def test_symbol_drift_t7_test_file_excluded(tmp_path: Path) -> None:
+    """T7: Helper added to test file -> no symbol drift warning because test files excluded."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    test_f = tmp_path / "tests" / "test_calculator.py"
+    test_f.parent.mkdir(parents=True, exist_ok=True)
+    test_f.write_text(
+        "def test_multiply():\n    pass\ndef test_helper():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"tests/test_calculator.py": {"test_existing"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"tests/test_calculator.py"}),
+        file_symbols={
+            "tests/test_calculator.py": {"test_existing", "test_multiply", "test_helper"}
+        },
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"tests/test_calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0
+
+
+def test_symbol_drift_t8_standalone_verify_without_snapshots(tmp_path: Path) -> None:
+    """T8: Standalone verify with no session changeset -> existing behavior works without crash."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\ndef multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=None,
+        pre_snapshot=None,
+        post_snapshot=None,
+    )
+    assert result.status is not None
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0
+
+
+def test_symbol_drift_async_and_class_methods(tmp_path: Path) -> None:
+    """Symbol drift detects unexpected async functions and class methods."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text("class Calculator:\n    pass\n", encoding="utf-8")
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": set()},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={
+            "src/calculator.py": {
+                "multiply",
+                "async_fetch",
+                "Calculator.compute",
+                "Calculator._private_helper",
+            }
+        },
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    drift_symbols = {d.symbol for d in drift}
+    assert "async_fetch" in drift_symbols
+    assert "Calculator.compute" in drift_symbols
+    assert "Calculator._private_helper" not in drift_symbols
+    assert "multiply" not in drift_symbols
+
+
+def test_symbol_drift_expected_class_qualified_symbol(tmp_path: Path) -> None:
+    """Expected class-qualified symbol Calculator.multiply produces no drift warning."""
+    calc_path = tmp_path / "src" / "calculator.py"
+    calc_path.parent.mkdir(parents=True, exist_ok=True)
+    calc_path.write_text(
+        "class Calculator:\n    def multiply(self):\n        pass\n",
+        encoding="utf-8",
+    )
+
+    baseline = ImplementationBaseline(
+        schema_version="0.1.0",
+        repository=BaselineRepositoryInfo(name=tmp_path.name, commit="c1"),
+        intent=BaselineIntent(title="Add Calculator.multiply", goal="Method addition"),
+        expectations=BaselineExpectations(
+            expected_files=[
+                ExpectedFile(path="src/calculator.py", action="modify", status="resolved")
+            ],
+            expected_symbols=[
+                ExpectedSymbol(name="Calculator.multiply", kind="method", status="unresolved")
+            ],
+        ),
+    )
+    repo_info = GitRepoInfo(root=tmp_path, branch="main", head_sha="c1", is_dirty=False)
+
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": {"Calculator"}},
+    )
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": {"Calculator", "Calculator.multiply"}},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.PASS
+    drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0

@@ -17,6 +17,7 @@ from codealign.models.baseline import (
     BaselineIntent,
     BaselineRepositoryInfo,
     ExpectedFile,
+    ExpectedSymbol,
     ImplementationBaseline,
 )
 from codealign.models.finding import Finding, FindingCategory, FindingSeverity
@@ -748,3 +749,52 @@ def test_implement_session_filters_artifacts_from_scope_drift(
     assert "Unexpected file changed: 'plan.md'" not in result.stdout
     assert "Unexpected file changed: '__pycache__/calc.cpython-312.pyc'" not in result.stdout
     assert "Unexpected file changed: 'other.pyc'" not in result.stdout
+
+
+def test_implement_detects_symbol_drift_in_expected_file(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end implement detects symbol-level drift inside expected files."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+
+    calc = initialized_repo / "src" / "calculator.py"
+    calc.parent.mkdir(parents=True, exist_ok=True)
+    calc.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    # Update baseline with expected symbol 'multiply'
+    bl_path = initialized_repo / ".codealign" / "baseline.json"
+    bl = ImplementationBaseline.from_file(bl_path)
+    bl.expectations.expected_symbols = [
+        ExpectedSymbol(name="multiply", kind="function", status="unresolved")
+    ]
+    bl_path.write_text(bl.to_json(), encoding="utf-8")
+
+    def mock_agent_run(*args, **kwargs):
+        # Agent adds expected 'multiply' PLUS unexpected 'divide'
+        calc.write_text(
+            "def add(a, b):\n    return a + b\n"
+            "def multiply(a, b):\n    return a * b\n"
+            "def divide(a, b):\n    return a / b\n",
+            encoding="utf-8",
+        )
+        return GeminiResult(success=True, exit_code=0, stdout="Done")
+
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_agent_run)
+    session_cs = GitChangeSet(base_commit="1234567890abcdef", modified={"src/calculator.py"})
+    monkeypatch.setattr(
+        "codealign.commands.implement.compute_session_changes",
+        lambda *args: session_cs,
+    )
+
+    # Normal mode: exit code 0, warning rendered
+    result = runner.invoke(app, ["implement"])
+    assert result.exit_code == 0
+    assert "Unexpected symbol 'divide' introduced in 'src/calculator.py'" in result.stdout
+
+    # Reset file before second run to simulate a fresh agent session introducing divide
+    calc.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    # Strict mode: exit code 1
+    result_strict = runner.invoke(app, ["implement", "--strict"])
+    assert result_strict.exit_code == 1

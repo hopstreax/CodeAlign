@@ -7,7 +7,12 @@ from codealign.git.repository import GitRepoInfo
 from codealign.models.baseline import ExpectedSymbol, ImplementationBaseline
 from codealign.models.finding import Finding, FindingCategory, FindingSeverity
 from codealign.models.result import VerificationResult, VerificationStatus
-from codealign.verify.git_diff import BaseCommitNotFoundError, GitChangeSet, get_git_changes
+from codealign.verify.git_diff import (
+    BaseCommitNotFoundError,
+    GitChangeSet,
+    WorkingTreeSnapshot,
+    get_git_changes,
+)
 
 TEST_PATH_PATTERNS = (
     r"^tests?/",
@@ -210,6 +215,44 @@ def _find_created_symbol_in_repo(
     return None
 
 
+def _is_symbol_expected(
+    sym_name: str,
+    file_path: str,
+    baseline: ImplementationBaseline,
+) -> bool:
+    """Check if an introduced symbol name is expected by the baseline contract."""
+    sym_parts = sym_name.split(".")
+    sym_ident = sym_parts[-1]
+
+    for exp in baseline.expectations.expected_symbols:
+        clean_exp = exp.name.replace("\\", "").rstrip("()")
+        if not clean_exp:
+            continue
+
+        exp_parts = clean_exp.split(".")
+        exp_ident = exp_parts[-1]
+
+        # If expected symbol has an explicit containing file, ensure it matches
+        if exp.file_path:
+            norm_exp_file = _normalize_path(exp.file_path)
+            if norm_exp_file and norm_exp_file != file_path:
+                continue
+
+        # Exact match (e.g. "Calculator.multiply" == "Calculator.multiply")
+        if sym_name == clean_exp:
+            return True
+
+        # Identifier match (e.g. "Calculator.multiply" or "multiply" matching expected "multiply")
+        if sym_ident == exp_ident:
+            # If both are qualified, class must also match
+            if len(sym_parts) == 2 and len(exp_parts) == 2:
+                if sym_parts[0] == exp_parts[0]:
+                    return True
+            else:
+                return True
+
+    return False
+
 
 def verify_implementation(
     baseline: ImplementationBaseline,
@@ -217,6 +260,8 @@ def verify_implementation(
     repo_info: GitRepoInfo | None = None,
     strict: bool = False,
     changeset: GitChangeSet | None = None,
+    pre_snapshot: WorkingTreeSnapshot | None = None,
+    post_snapshot: WorkingTreeSnapshot | None = None,
 ) -> VerificationResult:
     """Verify actual repository changes against the ImplementationBaseline contract.
 
@@ -226,6 +271,8 @@ def verify_implementation(
         repo_info: Optional GitRepoInfo for active repository.
         strict: If True, treat any warnings as verification failure.
         changeset: Optional pre-computed GitChangeSet (e.g. from an implementation session).
+        pre_snapshot: Optional pre-session working tree snapshot for symbol drift detection.
+        post_snapshot: Optional post-session working tree snapshot for symbol drift detection.
 
     Returns:
         VerificationResult with deterministic status and structured findings.
@@ -531,7 +578,64 @@ def verify_implementation(
                         )
                     )
 
-    # 7. Constraints Verification
+    # 7. Symbol-Level Drift Verification (Unexpected Defined Symbols)
+    if pre_snapshot is not None and post_snapshot is not None:
+        expected_impl_paths = {
+            _normalize_path(f.path)
+            for f in baseline.expectations.expected_files
+            if f.action != "delete"
+        }
+        expected_test_paths = {
+            _normalize_path(t.path)
+            for t in baseline.expectations.expected_tests
+        }
+
+        for changed_file in sorted(changeset.all_changed_files):
+            # Only evaluate expected implementation files
+            if changed_file not in expected_impl_paths:
+                continue
+            # Exclude test files
+            if _is_test_path(changed_file) or changed_file in expected_test_paths:
+                continue
+            # Exclude workflow and runtime artifacts
+            if _is_codealign_artifact(changed_file):
+                continue
+            if _is_plan_artifact(changed_file, baseline.intent.plan_file, repo_root):
+                continue
+            if _is_python_runtime_artifact(changed_file):
+                continue
+
+            pre_syms = pre_snapshot.file_symbols.get(changed_file, set())
+            post_syms = post_snapshot.file_symbols.get(changed_file, set())
+
+            introduced_syms = post_syms - pre_syms
+            for sym_name in sorted(introduced_syms):
+                # Only public symbols are candidates: ignore symbols beginning with "_"
+                parts = sym_name.split(".")
+                if any(p.startswith("_") for p in parts):
+                    continue
+
+                # Remove/ignore symbols explicitly expected by baseline
+                if _is_symbol_expected(sym_name, changed_file, baseline):
+                    continue
+
+                findings.append(
+                    Finding(
+                        category=FindingCategory.ABSTRACTION_DRIFT,
+                        severity=FindingSeverity.WARN,
+                        message=f"Unexpected symbol '{sym_name}' introduced in '{changed_file}'.",
+                        file_path=changed_file,
+                        symbol=sym_name,
+                        expected="unmodified symbol set",
+                        actual=f"new symbol '{sym_name}' defined",
+                        evidence=(
+                            f"Symbol '{sym_name}' was not present in pre-session file "
+                            f"and was not expected by the baseline."
+                        ),
+                    )
+                )
+
+    # 8. Constraints Verification
     for constraint in baseline.constraints:
         findings.append(
             Finding(
@@ -547,7 +651,7 @@ def verify_implementation(
             )
         )
 
-    # 8. Sort findings deterministically (by severity rank, then category, then file_path)
+    # 9. Sort findings deterministically (by severity rank, then category, then file_path)
     severity_order = {
         FindingSeverity.ERROR: 0,
         FindingSeverity.WARN: 1,
@@ -563,7 +667,7 @@ def verify_implementation(
         )
     )
 
-    # 9. Compute Overall Status and Summary
+    # 10. Compute Overall Status and Summary
     failures_count = sum(1 for f in findings if f.severity == FindingSeverity.ERROR)
     warnings_count = sum(1 for f in findings if f.severity == FindingSeverity.WARN)
     passes_count = sum(1 for f in findings if f.severity == FindingSeverity.PASS)

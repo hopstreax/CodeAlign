@@ -259,8 +259,16 @@ def implement_command(
             f"Invoking {agent_display_name} CLI to implement changes for '{bl.intent.title}'..."
         )
 
+    expected_impl_files = [
+        ef.path for ef in bl.expectations.expected_files if ef.action != "delete"
+    ]
+
     # Capture pre-agent working tree snapshot
-    pre_snapshot = capture_working_tree_snapshot(repo_info.root, bl.repository.commit)
+    pre_snapshot = capture_working_tree_snapshot(
+        repo_info.root,
+        bl.repository.commit,
+        relevant_files=expected_impl_files,
+    )
 
     agent_result = None
     exec_exc = None
@@ -286,7 +294,11 @@ def implement_command(
         exec_exc = exc
 
     # Capture post-agent working tree snapshot and compute session changes
-    post_snapshot = capture_working_tree_snapshot(repo_info.root, bl.repository.commit)
+    post_snapshot = capture_working_tree_snapshot(
+        repo_info.root,
+        bl.repository.commit,
+        relevant_files=expected_impl_files,
+    )
     session_changeset = compute_session_changes(
         pre_snapshot,
         post_snapshot,
@@ -342,6 +354,8 @@ def implement_command(
         repo_info=repo_info,
         strict=strict,
         changeset=session_changeset,
+        pre_snapshot=pre_snapshot,
+        post_snapshot=post_snapshot,
     )
 
     # 8. Report both results
