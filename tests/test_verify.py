@@ -27,6 +27,7 @@ from codealign.verify.git_diff import (
     capture_working_tree_snapshot,
     compute_session_changes,
     extract_file_symbols,
+    extract_file_symbols_and_fingerprints,
 )
 from codealign.verify.verifier import verify_implementation
 
@@ -1544,4 +1545,431 @@ def test_symbol_drift_expected_class_qualified_symbol(tmp_path: Path) -> None:
     )
     assert result.status == VerificationStatus.PASS
     drift = [f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT]
+    assert len(drift) == 0
+
+
+def test_behavioral_drift_body_change_warns(tmp_path: Path) -> None:
+    """Body change (a + b -> a - b) triggers BEHAVIORAL_DRIFT WARN, FAIL in strict mode."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "def add(a: int, b: int) -> int:\n    return a - b\n"
+        "def multiply(a: int, b: int) -> int:\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].symbol == "add"
+    assert drift[0].severity == FindingSeverity.WARN
+    assert "Implementation body of function 'add' was modified" in drift[0].message
+    assert "(signature preserved)" in drift[0].message
+    assert drift[0].expected == "unmodified function body"
+    assert drift[0].actual == "modified body implementation"
+
+    result_strict = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+        strict=True,
+    )
+    assert result_strict.status == VerificationStatus.FAIL
+
+
+def test_behavioral_drift_signature_change_warns(tmp_path: Path) -> None:
+    """Signature change (adding parameter) triggers BEHAVIORAL_DRIFT WARN."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "def add(a: int, b: int, c: int = 0) -> int:\n    return a + b\n"
+        "def multiply(a: int, b: int) -> int:\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].symbol == "add"
+    assert drift[0].severity == FindingSeverity.WARN
+    assert "Signature of function 'add' was modified" in drift[0].message
+    assert drift[0].expected == "unmodified function signature"
+    assert drift[0].actual == "modified signature"
+
+
+def test_behavioral_drift_decorator_change_warns(tmp_path: Path) -> None:
+    """Decorator change triggers BEHAVIORAL_DRIFT WARN."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "@validate\ndef add(a: int, b: int) -> int:\n    return a + b\n"
+        "def multiply(a: int, b: int) -> int:\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].symbol == "add"
+    assert "Signature of function 'add' was modified" in drift[0].message
+
+
+def test_behavioral_drift_docstring_only_no_warning(tmp_path: Path) -> None:
+    """Modifying only the docstring produces zero behavioral drift findings."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        'def add(a: int, b: int) -> int:\n    """Original docstring."""\n    return a + b\n',
+        encoding="utf-8",
+    )
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        'def add(a: int, b: int) -> int:\n    """Updated detailed docstring."""\n    return a + b\n'
+        "def multiply(a: int, b: int) -> int:\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 0
+    assert result.status == VerificationStatus.PASS
+
+
+def test_behavioral_drift_formatting_only_no_warning(tmp_path: Path) -> None:
+    """Formatting and comment changes produce zero behavioral drift findings."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a: int, b: int) -> int:\n    # Comment 1\n    return a + b\n",
+        encoding="utf-8",
+    )
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "def add(  a: int,   b: int  ) -> int:\n"
+        "    # Completely different comment\n\n"
+        "    return a   +   b\n"
+        "def multiply(a: int, b: int) -> int:\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 0
+    assert result.status == VerificationStatus.PASS
+
+
+def test_behavioral_drift_untouched_preexisting_dirty_no_warning(tmp_path: Path) -> None:
+    """Pre-existing dirty function untouched in session produces zero drift findings."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def untouched(x):\n    return x * 2\n",
+        encoding="utf-8",
+    )
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def untouched(x):\n    return x * 2\n"
+        "def multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 0
+    assert result.status == VerificationStatus.PASS
+
+
+def test_behavioral_drift_preexisting_dirty_modified_in_session_warns(tmp_path: Path) -> None:
+    """Pre-existing dirty function modified in session triggers drift warning."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def draft(x):\n    return x\n",
+        encoding="utf-8",
+    )
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def draft(x):\n    return x * 10\n"
+        "def multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.WARN
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
+    assert len(drift) == 1
+    assert drift[0].symbol == "draft"
+    assert "Implementation body of function 'draft' was modified" in drift[0].message
+
+
+def test_behavioral_drift_new_function_ignored_by_phase8(tmp_path: Path) -> None:
+    """New unexpected function is reported by Phase 7 as ABSTRACTION_DRIFT, not Phase 8."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text(
+        "def add(a, b):\n    return a + b\n"
+        "def multiply(a, b):\n    return a * b\n"
+        "def divide(a, b):\n    return a / b\n",
+        encoding="utf-8",
+    )
+    syms_post, fps_post, _ = extract_file_symbols_and_fingerprints(calc)
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    behavioral_drift = [
+        f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT
+    ]
+    assert len(behavioral_drift) == 0
+
+    abstraction_drift = [
+        f for f in result.findings if f.category == FindingCategory.ABSTRACTION_DRIFT
+    ]
+    assert len(abstraction_drift) == 1
+    assert abstraction_drift[0].symbol == "divide"
+
+
+def test_behavioral_drift_syntax_error_reported_as_error(tmp_path: Path) -> None:
+    """Invalid syntax in post-snapshot file reports MISSING_IMPLEMENTATION error."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    syms_pre, fps_pre, _ = extract_file_symbols_and_fingerprints(calc)
+    pre = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1"),
+        file_symbols={"src/calculator.py": syms_pre},
+        symbol_fingerprints={"src/calculator.py": fps_pre},
+    )
+
+    calc.write_text("def broken(:\n    return\n", encoding="utf-8")
+    syms_post, fps_post, err_post = extract_file_symbols_and_fingerprints(calc)
+    assert err_post is not None
+    post = WorkingTreeSnapshot(
+        changeset=GitChangeSet(base_commit="c1", modified={"src/calculator.py"}),
+        file_symbols={"src/calculator.py": syms_post},
+        symbol_fingerprints={"src/calculator.py": fps_post},
+        parse_errors={"src/calculator.py": err_post},
+    )
+    cs = GitChangeSet(base_commit="c1", modified={"src/calculator.py"})
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=cs,
+        pre_snapshot=pre,
+        post_snapshot=post,
+    )
+    assert result.status == VerificationStatus.FAIL
+    errors = [f for f in result.findings if f.severity == FindingSeverity.ERROR]
+    assert len(errors) == 1
+    assert errors[0].category == FindingCategory.MISSING_IMPLEMENTATION
+    assert "Syntax error in 'src/calculator.py'" in errors[0].message
+    assert "SyntaxError" in errors[0].evidence
+
+
+def test_behavioral_drift_standalone_verify_without_snapshots_passes(tmp_path: Path) -> None:
+    """Standalone verification without snapshots passes without behavioral drift checks."""
+    baseline, repo_info = _make_symbol_drift_baseline(tmp_path)
+    calc = tmp_path / "src" / "calculator.py"
+    calc.write_text(
+        "def add(a, b):\n    return a - b\n"
+        "def multiply(a, b):\n    return a * b\n",
+        encoding="utf-8",
+    )
+
+    result = verify_implementation(
+        baseline=baseline,
+        repo_root=tmp_path,
+        repo_info=repo_info,
+        changeset=None,
+        pre_snapshot=None,
+        post_snapshot=None,
+    )
+    assert result.status is not None
+    drift = [f for f in result.findings if f.category == FindingCategory.BEHAVIORAL_DRIFT]
     assert len(drift) == 0

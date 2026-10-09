@@ -40,13 +40,23 @@ class GitChangeSet:
 
 
 @dataclass(frozen=True)
+class SymbolFingerprint:
+    """Deterministic fingerprint of a callable symbol's signature and body."""
+
+    sig_hash: str
+    body_hash: str
+    line: int
+
+
+@dataclass(frozen=True)
 class WorkingTreeSnapshot:
     """Deterministic snapshot of repository working-tree state, dirty hashes, and symbols."""
 
     changeset: GitChangeSet
     dirty_hashes: dict[str, str] = field(default_factory=dict)
     file_symbols: dict[str, set[str]] = field(default_factory=dict)
-
+    symbol_fingerprints: dict[str, dict[str, SymbolFingerprint]] = field(default_factory=dict)
+    parse_errors: dict[str, str] = field(default_factory=dict)
 
 
 def _normalize_path(p: str) -> str:
@@ -162,30 +172,77 @@ def _hash_file(path: Path) -> str | None:
         return None
 
 
-def _extract_python_symbols(content: str) -> set[str]:
-    """Extract functions, async functions, classes, and methods from Python source."""
+def _normalize_ast_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Compute normalized SHA-256 hash of callable signature."""
+    returns_dump = (
+        ast.dump(node.returns, include_attributes=False) if node.returns is not None else ""
+    )
+    args_dump = ast.dump(node.args, include_attributes=False)
+    decorators_dump = [ast.dump(d, include_attributes=False) for d in node.decorator_list]
+    async_prefix = "async" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    sig_repr = f"{async_prefix}|{returns_dump}|{args_dump}|{decorators_dump}"
+    return hashlib.sha256(sig_repr.encode("utf-8")).hexdigest()
+
+
+def _normalize_ast_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
+    """Compute normalized SHA-256 hash of callable body, excluding leading docstring."""
+    body_stmts = node.body
+    if body_stmts and isinstance(body_stmts[0], ast.Expr):
+        val = body_stmts[0].value
+        if isinstance(val, ast.Constant) and isinstance(val.value, str):
+            body_stmts = body_stmts[1:]
+
+    body_repr = "\n".join(ast.dump(stmt, include_attributes=False) for stmt in body_stmts)
+    return hashlib.sha256(body_repr.encode("utf-8")).hexdigest()
+
+
+def _extract_python_symbols_and_fingerprints(
+    content: str,
+) -> tuple[set[str], dict[str, SymbolFingerprint], str | None]:
+    """Extract functions, async functions, classes, methods, and fingerprints from Python source."""
     try:
         tree = ast.parse(content)
-    except (SyntaxError, ValueError):
-        return set()
+    except (SyntaxError, ValueError) as exc:
+        line_info = f" (line {exc.lineno})" if getattr(exc, "lineno", None) else ""
+        msg = getattr(exc, "msg", str(exc))
+        return set(), {}, f"SyntaxError: {msg}{line_info}"
 
     symbols: set[str] = set()
+    fingerprints: dict[str, SymbolFingerprint] = {}
 
     def _walk_class(class_node: ast.ClassDef, prefix: str) -> None:
         for item in class_node.body:
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                symbols.add(f"{prefix}.{item.name}")
+                sym_name = f"{prefix}.{item.name}"
+                symbols.add(sym_name)
+                fingerprints[sym_name] = SymbolFingerprint(
+                    sig_hash=_normalize_ast_signature(item),
+                    body_hash=_normalize_ast_body(item),
+                    line=getattr(item, "lineno", 1),
+                )
             elif isinstance(item, ast.ClassDef):
-                symbols.add(f"{prefix}.{item.name}")
-                _walk_class(item, f"{prefix}.{item.name}")
+                sym_name = f"{prefix}.{item.name}"
+                symbols.add(sym_name)
+                _walk_class(item, sym_name)
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             symbols.add(node.name)
+            fingerprints[node.name] = SymbolFingerprint(
+                sig_hash=_normalize_ast_signature(node),
+                body_hash=_normalize_ast_body(node),
+                line=getattr(node, "lineno", 1),
+            )
         elif isinstance(node, ast.ClassDef):
             symbols.add(node.name)
             _walk_class(node, node.name)
 
+    return symbols, fingerprints, None
+
+
+def _extract_python_symbols(content: str) -> set[str]:
+    """Extract functions, async functions, classes, and methods from Python source."""
+    symbols, _, _ = _extract_python_symbols_and_fingerprints(content)
     return symbols
 
 
@@ -214,18 +271,26 @@ def _extract_generic_symbols(content: str) -> set[str]:
     return symbols
 
 
-def extract_file_symbols(path: Path) -> set[str]:
-    """Extract callable and class symbol names defined in a file."""
+def extract_file_symbols_and_fingerprints(
+    path: Path,
+) -> tuple[set[str], dict[str, SymbolFingerprint], str | None]:
+    """Extract callable and class symbol names and fingerprints defined in a file."""
     if not path.is_file():
-        return set()
+        return set(), {}, None
     try:
         content = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
-        return set()
+        return set(), {}, None
 
     if path.suffix == ".py":
-        return _extract_python_symbols(content)
-    return _extract_generic_symbols(content)
+        return _extract_python_symbols_and_fingerprints(content)
+    return _extract_generic_symbols(content), {}, None
+
+
+def extract_file_symbols(path: Path) -> set[str]:
+    """Extract callable and class symbol names defined in a file."""
+    syms, _, _ = extract_file_symbols_and_fingerprints(path)
+    return syms
 
 
 def capture_working_tree_snapshot(
@@ -255,16 +320,25 @@ def capture_working_tree_snapshot(
         files_to_scan.update(_normalize_path(f) for f in relevant_files)
 
     file_symbols: dict[str, set[str]] = {}
+    symbol_fingerprints: dict[str, dict[str, SymbolFingerprint]] = {}
+    parse_errors: dict[str, str] = {}
+
     for file_path in sorted(files_to_scan):
         full_path = repo_root / file_path
         if full_path.is_file():
-            syms = extract_file_symbols(full_path)
+            syms, fps, err = extract_file_symbols_and_fingerprints(full_path)
             file_symbols[file_path] = syms
+            if fps:
+                symbol_fingerprints[file_path] = fps
+            if err:
+                parse_errors[file_path] = err
 
     return WorkingTreeSnapshot(
         changeset=changeset,
         dirty_hashes=dirty_hashes,
         file_symbols=file_symbols,
+        symbol_fingerprints=symbol_fingerprints,
+        parse_errors=parse_errors,
     )
 
 

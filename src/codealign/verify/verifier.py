@@ -635,7 +635,102 @@ def verify_implementation(
                     )
                 )
 
-    # 8. Constraints Verification
+    # 8. Behavioral Drift Verification (Signature and Body Changes in Existing Callables)
+    if pre_snapshot is not None and post_snapshot is not None:
+        expected_impl_paths = {
+            _normalize_path(f.path)
+            for f in baseline.expectations.expected_files
+            if f.action != "delete"
+        }
+        expected_test_paths = {
+            _normalize_path(t.path)
+            for t in baseline.expectations.expected_tests
+        }
+
+        for changed_file in sorted(changeset.all_changed_files):
+            # Only evaluate expected implementation files
+            if changed_file not in expected_impl_paths:
+                continue
+            # Exclude test files
+            if _is_test_path(changed_file) or changed_file in expected_test_paths:
+                continue
+            # Exclude workflow and runtime artifacts
+            if _is_codealign_artifact(changed_file):
+                continue
+            if _is_plan_artifact(changed_file, baseline.intent.plan_file, repo_root):
+                continue
+            if _is_python_runtime_artifact(changed_file):
+                continue
+
+            parse_errors = getattr(post_snapshot, "parse_errors", {})
+            if changed_file in parse_errors:
+                parse_err = parse_errors[changed_file]
+                findings.append(
+                    Finding(
+                        category=FindingCategory.MISSING_IMPLEMENTATION,
+                        severity=FindingSeverity.ERROR,
+                        message=f"Syntax error in '{changed_file}': {parse_err}.",
+                        file_path=changed_file,
+                        expected="valid Python syntax",
+                        actual="syntax error",
+                        evidence=parse_err,
+                    )
+                )
+                continue
+
+            if not changed_file.endswith(".py"):
+                continue
+
+            pre_fps_map = getattr(pre_snapshot, "symbol_fingerprints", {})
+            post_fps_map = getattr(post_snapshot, "symbol_fingerprints", {})
+            pre_fps = pre_fps_map.get(changed_file, {})
+            post_fps = post_fps_map.get(changed_file, {})
+
+            common_syms = sorted(set(pre_fps.keys()) & set(post_fps.keys()))
+            for sym_name in common_syms:
+                pre_fp = pre_fps[sym_name]
+                post_fp = post_fps[sym_name]
+
+                if pre_fp.sig_hash != post_fp.sig_hash:
+                    findings.append(
+                        Finding(
+                            category=FindingCategory.BEHAVIORAL_DRIFT,
+                            severity=FindingSeverity.WARN,
+                            message=(
+                                f"Signature of function '{sym_name}' was modified "
+                                f"in '{changed_file}'."
+                            ),
+                            file_path=changed_file,
+                            symbol=sym_name,
+                            expected="unmodified function signature",
+                            actual="modified signature",
+                            evidence=(
+                                f"Callable '{sym_name}' (line {post_fp.line}) signature hash "
+                                f"changed from {pre_fp.sig_hash[:8]} to {post_fp.sig_hash[:8]}"
+                            ),
+                        )
+                    )
+                elif pre_fp.body_hash != post_fp.body_hash:
+                    findings.append(
+                        Finding(
+                            category=FindingCategory.BEHAVIORAL_DRIFT,
+                            severity=FindingSeverity.WARN,
+                            message=(
+                                f"Implementation body of function '{sym_name}' was modified "
+                                f"in '{changed_file}' (signature preserved)."
+                            ),
+                            file_path=changed_file,
+                            symbol=sym_name,
+                            expected="unmodified function body",
+                            actual="modified body implementation",
+                            evidence=(
+                                f"Callable '{sym_name}' (line {post_fp.line}) body hash "
+                                f"changed from {pre_fp.body_hash[:8]} to {post_fp.body_hash[:8]}"
+                            ),
+                        )
+                    )
+
+    # 9. Constraints Verification
     for constraint in baseline.constraints:
         findings.append(
             Finding(
@@ -651,7 +746,7 @@ def verify_implementation(
             )
         )
 
-    # 9. Sort findings deterministically (by severity rank, then category, then file_path)
+    # 10. Sort findings deterministically (by severity rank, then category, then file_path)
     severity_order = {
         FindingSeverity.ERROR: 0,
         FindingSeverity.WARN: 1,
