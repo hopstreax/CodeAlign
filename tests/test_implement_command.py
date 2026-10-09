@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from codealign.agent.antigravity import AntigravityResult
 from codealign.agent.gemini import GeminiResult
 from codealign.cli import app
-from codealign.git.repository import GitRepoInfo, NotAGitRepositoryError
+from codealign.git.repository import GitRepoInfo, NotAGitRepositoryError, run_git_command
 from codealign.models.baseline import (
     BaselineEvidence,
     BaselineExpectations,
@@ -18,6 +18,7 @@ from codealign.models.baseline import (
     BaselineRepositoryInfo,
     ExpectedFile,
     ExpectedSymbol,
+    ExpectedTest,
     ImplementationBaseline,
 )
 from codealign.models.finding import Finding, FindingCategory, FindingSeverity
@@ -798,3 +799,163 @@ def test_implement_detects_symbol_drift_in_expected_file(
     # Strict mode: exit code 1
     result_strict = runner.invoke(app, ["implement", "--strict"])
     assert result_strict.exit_code == 1
+
+
+def test_implement_symbol_drift_detected_with_expected_multiply_and_unexpected_divide(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2E implement detects unexpected symbol drift during session alongside expected changes."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+
+    # 1. Initialize a clean real Git repo so snapshot capture and session diff execute naturally
+    run_git_command(["init", "-b", "main"], cwd=repo_root)
+    run_git_command(["config", "user.name", "Test User"], cwd=repo_root)
+    run_git_command(["config", "user.email", "test@example.com"], cwd=repo_root)
+
+    calc = repo_root / "src" / "calculator.py"
+    calc.parent.mkdir(parents=True, exist_ok=True)
+    calc.write_text(
+        "def add(a: int, b: int) -> int:\n"
+        "    return a + b\n",
+        encoding="utf-8",
+    )
+
+    test_calc = repo_root / "tests" / "test_calculator.py"
+    test_calc.parent.mkdir(parents=True, exist_ok=True)
+    test_calc.write_text(
+        "from src.calculator import add\n\n\n"
+        "def test_add() -> None:\n"
+        "    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+
+    run_git_command(["add", "."], cwd=repo_root)
+    run_git_command(["commit", "-m", "Initial commit"], cwd=repo_root)
+    base_commit = run_git_command(["rev-parse", "HEAD"], cwd=repo_root)
+
+    repo_info = GitRepoInfo(
+        root=repo_root,
+        branch="main",
+        head_sha=base_commit,
+        is_dirty=False,
+    )
+    monkeypatch.setattr("codealign.commands.implement.get_git_repo_info", lambda: repo_info)
+
+    # 2. Setup .codealign baseline and context
+    codealign_dir = repo_root / ".codealign"
+    codealign_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline = ImplementationBaseline(
+        schema_version="0.1.0",
+        generated_at="2026-10-09T00:00:00Z",
+        repository=BaselineRepositoryInfo(
+            name=repo_root.name,
+            branch="main",
+            commit=base_commit,
+        ),
+        intent=BaselineIntent(
+            plan_file="plan.md",
+            title="Add Multiply Operation",
+            goal="Add multiply operation without changing add.",
+            steps=[
+                "Add `multiply()` to `src/calculator.py`.",
+                "Add a test for `multiply()` to `tests/test_calculator.py`.",
+                "Preserve the existing `add()` behavior.",
+            ],
+        ),
+        evidence=BaselineEvidence(),
+        expectations=BaselineExpectations(
+            expected_files=[
+                ExpectedFile(path="src/calculator.py", action="modify", status="resolved"),
+                ExpectedFile(path="tests/test_calculator.py", action="modify", status="resolved"),
+            ],
+            expected_symbols=[
+                ExpectedSymbol(
+                    name="add",
+                    kind="function",
+                    file_path="src/calculator.py",
+                    status="existing",
+                ),
+                ExpectedSymbol(name="multiply", kind="function", status="unresolved"),
+            ],
+            expected_tests=[
+                ExpectedTest(path="tests/test_calculator.py", reason="Test multiply"),
+            ],
+        ),
+    )
+    (codealign_dir / "baseline.json").write_text(baseline.to_json(), encoding="utf-8")
+    (codealign_dir / "context.md").write_text(
+        "# Context\nAdd multiply operation\n", encoding="utf-8"
+    )
+
+    # 3. Deterministic fake agent run
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+
+    def fake_agent_run(*args, **kwargs) -> GeminiResult:
+        # Preserve add, add expected multiply, add unexpected divide
+        calc.write_text(
+            "def add(a: int, b: int) -> int:\n"
+            "    return a + b\n\n\n"
+            "def multiply(a: int, b: int) -> int:\n"
+            "    return a * b\n\n\n"
+            "def divide(a: int, b: int) -> float:\n"
+            "    return a / b\n",
+            encoding="utf-8",
+        )
+        # Add test for multiply
+        test_calc.write_text(
+            "from src.calculator import add, multiply\n\n\n"
+            "def test_add() -> None:\n"
+            "    assert add(2, 3) == 5\n\n\n"
+            "def test_multiply() -> None:\n"
+            "    assert multiply(2, 3) == 6\n",
+            encoding="utf-8",
+        )
+        return GeminiResult(success=True, exit_code=0, stdout="Implemented changes")
+
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", fake_agent_run)
+
+    # 4. Verify normal mode: exit code 0, expected passes and ABSTRACTION_DRIFT warning rendered
+    result_normal = runner.invoke(app, ["implement"])
+    assert result_normal.exit_code == 0
+    assert "Expected symbol 'multiply' created in 'src/calculator.py'" in result_normal.output
+    assert "Expected file 'src/calculator.py' was modified" in result_normal.output
+    assert "Expected file 'tests/test_calculator.py' was modified" in result_normal.output
+    assert "Expected test file 'tests/test_calculator.py' verified" in result_normal.output
+    assert "Unexpected symbol 'divide' introduced in 'src/calculator.py'" in result_normal.output
+
+    # 5. Verify JSON mode to assert finding category is ABSTRACTION_DRIFT explicitly
+    calc.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+    test_calc.write_text(
+        "from src.calculator import add\n\ndef test_add() -> None:\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+
+    result_json = runner.invoke(app, ["implement", "--format", "json"])
+    assert result_json.exit_code == 0
+    data = json.loads(result_json.output)
+    assert data["session"]["modified"] == ["src/calculator.py", "tests/test_calculator.py"]
+    assert data["verification"]["status"] == "warn"
+
+    findings = data["verification"]["findings"]
+    drift_findings = [f for f in findings if f["category"] == "abstraction_drift"]
+    assert len(drift_findings) == 1
+    assert drift_findings[0]["symbol"] == "divide"
+    assert drift_findings[0]["severity"] == "warn"
+    assert (
+        "Unexpected symbol 'divide' introduced in 'src/calculator.py'"
+        in drift_findings[0]["message"]
+    )
+
+    # 6. Verify strict mode: exit code 1 because warnings are treated as failures
+    calc.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+    test_calc.write_text(
+        "from src.calculator import add\n\ndef test_add() -> None:\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+
+    result_strict = runner.invoke(app, ["implement", "--strict"])
+    assert result_strict.exit_code == 1
+    assert "Unexpected symbol 'divide' introduced in 'src/calculator.py'" in result_strict.output
