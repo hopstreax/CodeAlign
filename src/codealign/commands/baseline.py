@@ -96,7 +96,8 @@ def baseline_command(
         else:
             typer.secho(
                 f"Error: Code intelligence graph not found at '{graph_path}'.\n"
-                "Run 'codealign init' to extract code intelligence from the repository.",
+                "Code intelligence requires Graphify extraction. Ensure 'graphify' is installed\n"
+                "and on PATH, then run 'codealign init --force' to generate the repository graph.",
                 fg=typer.colors.RED,
                 err=True,
             )

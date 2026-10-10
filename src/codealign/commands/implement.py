@@ -1,6 +1,7 @@
 """Command: codealign implement"""
 
 import json
+import math
 from enum import Enum
 from pathlib import Path
 
@@ -126,6 +127,12 @@ def implement_command(
         "-c",
         help="Path to context file (defaults to .codealign/context.md).",
     ),
+    timeout: float = typer.Option(
+        300.0,
+        "--timeout",
+        "-t",
+        help="Agent execution timeout in seconds (default: 300).",
+    ),
     approval_mode: str = typer.Option(
         "auto_edit",
         "--approval-mode",
@@ -160,6 +167,16 @@ def implement_command(
     ),
 ) -> None:
     """Hand off implementation baseline to a coding agent CLI and verify resulting changes."""
+    # 0. Validate timeout
+    if not math.isfinite(timeout) or timeout <= 0:
+        typer.secho(
+            f"Error: Invalid timeout '{timeout}'. "
+            "Timeout must be a positive finite number of seconds.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     # 1. Confirm inside a Git repository
     try:
         repo_info = get_git_repo_info()
@@ -280,6 +297,7 @@ def implement_command(
                 approval_mode=approval_mode,
                 yolo=yolo,
                 model=model,
+                timeout=timeout,
             )
         else:
             skip_perm = dangerously_skip_permissions or yolo
@@ -289,6 +307,7 @@ def implement_command(
                 mode="accept-edits",
                 dangerously_skip_permissions=skip_perm,
                 model=model,
+                timeout=timeout,
             )
     except (GeminiExecutionError, AntigravityExecutionError) as exc:
         exec_exc = exc

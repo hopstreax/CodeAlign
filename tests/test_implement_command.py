@@ -1163,3 +1163,121 @@ def test_implement_full_pipeline_session_tracking_abstraction_and_behavioral_dri
     assert "Unexpected symbol 'divide' introduced in 'src/calculator.py'" in result_strict.output
     assert "Implementation body of function 'add' was modified" in result_strict.output
     assert "local-notes.txt" not in result_strict.output
+
+
+def test_implement_forwards_custom_timeout_gemini(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify --timeout is forwarded to GeminiAgent.run."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=GeminiResult(
+            success=True,
+            exit_code=0,
+        )
+    )
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement", "--timeout", "45.0"])
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs["timeout"] == 45.0
+
+
+def test_implement_forwards_custom_timeout_antigravity(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify -t / --timeout is forwarded to AntigravityAgent.run."""
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=AntigravityResult(
+            success=True,
+            exit_code=0,
+        )
+    )
+    monkeypatch.setattr("codealign.agent.AntigravityAgent.run", mock_run)
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement", "--agent", "antigravity", "-t", "90"])
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs["timeout"] == 90.0
+
+
+def test_implement_default_timeout_forwarded(
+    initialized_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify default timeout of 300.0 is forwarded when option is omitted."""
+    monkeypatch.setattr("codealign.agent.GeminiAgent.is_available", lambda: True)
+
+    mock_run = MagicMock(
+        return_value=GeminiResult(
+            success=True,
+            exit_code=0,
+        )
+    )
+    monkeypatch.setattr("codealign.agent.GeminiAgent.run", mock_run)
+    monkeypatch.setattr(
+        "codealign.commands.implement.verify_implementation",
+        lambda **kwargs: VerificationResult(status=VerificationStatus.PASS, summary="ok"),
+    )
+
+    result = runner.invoke(app, ["implement"])
+    assert result.exit_code == 0
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs["timeout"] == 300.0
+
+
+def test_implement_invalid_timeout_negative() -> None:
+    """Verify negative timeout value is rejected with clear error message."""
+    result = runner.invoke(app, ["implement", "--timeout", "-5"])
+    assert result.exit_code == 1
+    assert "Error: Invalid timeout '-5.0'" in result.output
+    assert "must be a positive finite number" in result.output
+
+
+def test_implement_invalid_timeout_zero() -> None:
+    """Verify zero timeout value is rejected with clear error message."""
+    result = runner.invoke(app, ["implement", "-t", "0"])
+    assert result.exit_code == 1
+    assert "Error: Invalid timeout '0.0'" in result.output
+    assert "must be a positive finite number" in result.output
+
+
+def test_implement_invalid_timeout_nan() -> None:
+    """Verify NaN timeout value is rejected with clear error message."""
+    result = runner.invoke(app, ["implement", "--timeout", "nan"])
+    assert result.exit_code == 1
+    assert "Error: Invalid timeout 'nan'" in result.output
+    assert "must be a positive finite number" in result.output
+
+
+def test_implement_invalid_timeout_pos_inf() -> None:
+    """Verify positive infinity timeout value is rejected with clear error message."""
+    result = runner.invoke(app, ["implement", "--timeout", "inf"])
+    assert result.exit_code == 1
+    assert "Error: Invalid timeout 'inf'" in result.output
+    assert "must be a positive finite number" in result.output
+
+
+def test_implement_invalid_timeout_neg_inf() -> None:
+    """Verify negative infinity timeout value is rejected with clear error message."""
+    result = runner.invoke(app, ["implement", "-t", "-inf"])
+    assert result.exit_code == 1
+    assert "Error: Invalid timeout '-inf'" in result.output
+    assert "must be a positive finite number" in result.output

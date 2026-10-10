@@ -80,7 +80,13 @@ def init_command(
     if not graphify_bin:
         typer.echo("  not available (CLI 'graphify' not found in PATH)")
         typer.echo("\nCode intelligence:")
-        typer.echo("  unavailable")
+        typer.echo("  unavailable (graph has not been generated)")
+        typer.secho(
+            "\nPrerequisite notice: Graphify is required to extract repository code intelligence.\n"
+            "Install Graphify (e.g. 'pip install graphifyy') and ensure 'graphify' is on PATH,\n"
+            "then rerun 'codealign init --force' to extract code intelligence.",
+            fg=typer.colors.YELLOW,
+        )
         return
 
     typer.echo("  available")

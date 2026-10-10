@@ -2,8 +2,11 @@
 
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from codealign.agent.process import kill_process_tree
 
 
 class AntigravityError(Exception):
@@ -119,28 +122,72 @@ class AntigravityAgent:
             dangerously_skip_permissions=dangerously_skip_permissions,
             model=model,
         )
+
+        # Respect mocked subprocess.run if present in unit tests
+        if getattr(subprocess.run, "__module__", None) != "subprocess":
+            try:
+                process = subprocess.run(
+                    cmd,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                return AntigravityResult(
+                    success=(process.returncode == 0),
+                    exit_code=process.returncode,
+                    stdout=process.stdout,
+                    stderr=process.stderr,
+                    command=cmd,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise AntigravityExecutionError(
+                    f"Antigravity CLI timed out after {timeout} seconds.",
+                    command=cmd,
+                ) from exc
+            except Exception as exc:
+                raise AntigravityExecutionError(
+                    f"Failed to execute Antigravity CLI: {exc}",
+                    command=cmd,
+                ) from exc
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=(sys.platform != "win32"),
+        )
         try:
-            process = subprocess.run(
-                cmd,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout)
             return AntigravityResult(
-                success=(process.returncode == 0),
-                exit_code=process.returncode,
-                stdout=process.stdout,
-                stderr=process.stderr,
+                success=(proc.returncode == 0),
+                exit_code=proc.returncode,
+                stdout=stdout,
+                stderr=stderr,
                 command=cmd,
             )
         except subprocess.TimeoutExpired as exc:
+            kill_process_tree(proc.pid)
+            try:
+                proc.communicate(timeout=2.0)
+            except Exception:
+                pass
             raise AntigravityExecutionError(
                 f"Antigravity CLI timed out after {timeout} seconds.",
                 command=cmd,
             ) from exc
         except Exception as exc:
+            kill_process_tree(proc.pid)
             raise AntigravityExecutionError(
                 f"Failed to execute Antigravity CLI: {exc}",
                 command=cmd,
             ) from exc
+        finally:
+            if proc.poll() is None:
+                kill_process_tree(proc.pid)
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass

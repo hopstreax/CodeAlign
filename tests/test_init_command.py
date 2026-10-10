@@ -132,6 +132,25 @@ def test_init_skip_graphify(
     assert (mock_git_repo / ".codealign" / "config.toml").is_file()
 
 
+def test_init_missing_graphify_provides_actionable_guidance(
+    mock_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify missing Graphify executable provides actionable diagnostic guidance."""
+    monkeypatch.setattr(
+        "codealign.commands.init.find_graphify_executable", lambda: None
+    )
+
+    result = runner.invoke(app, ["init", "--path", str(mock_git_repo)])
+    assert result.exit_code == 0
+    assert "not available (CLI 'graphify' not found in PATH)" in result.stdout
+    assert "unavailable (graph has not been generated)" in result.stdout
+    assert "Graphify is required to extract repository code intelligence" in result.stdout
+    assert "pip install graphifyy" in result.stdout
+    assert "codealign init --force" in result.stdout
+
+
+
 def test_init_non_git_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify codealign init fails cleanly when run outside a Git repository."""
 

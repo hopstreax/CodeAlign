@@ -207,3 +207,36 @@ def test_antigravity_run_unexpected_error(tmp_path: Path, monkeypatch: pytest.Mo
         agent.run("context", cwd=tmp_path)
 
     assert "Failed to execute Antigravity CLI: Permission denied" in str(exc_info.value)
+
+
+def test_antigravity_run_timeout_kills_process_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify AntigravityAgent invokes kill_process_tree when process times out."""
+    killed_pids: list[int] = []
+    monkeypatch.setattr(
+        "codealign.agent.antigravity.kill_process_tree",
+        lambda pid: killed_pids.append(pid),
+    )
+
+    class FakePopen:
+        pid = 88888
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=["agy"], timeout=5.0)
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr("subprocess.Popen", FakePopen)
+
+    agent = AntigravityAgent(executable="/bin/agy")
+    with pytest.raises(AntigravityExecutionError) as exc_info:
+        agent.run("context", cwd=tmp_path, timeout=5.0)
+
+    assert "timed out after 5.0 seconds" in str(exc_info.value)
+    assert 88888 in killed_pids

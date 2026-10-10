@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from codealign.analysis.graph_index import GraphIndex
@@ -392,3 +393,29 @@ def test_baseline_missing_plan_and_uninitialized(tmp_path: Path, monkeypatch) ->
     res_uninit = runner.invoke(app, ["baseline", str(plan_file)])
     assert res_uninit.exit_code == 1
     assert "Error: CodeAlign is not initialized" in res_uninit.output
+
+
+def test_baseline_missing_graph_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify baseline reports actionable diagnostic when .codealign exists but graph is missing."""
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / ".codealign").mkdir()
+    plan_path = repo_root / "plan.md"
+    plan_path.write_text("# Test Plan\n\n- modify src/app.py", encoding="utf-8")
+
+    repo_info = GitRepoInfo(
+        root=repo_root,
+        branch="main",
+        head_sha="0123456789abcdef0123456789abcdef01234567",
+        is_dirty=False,
+    )
+    monkeypatch.setattr("codealign.commands.baseline.get_git_repo_info", lambda: repo_info)
+
+    result = runner.invoke(app, ["baseline", str(plan_path)])
+    assert result.exit_code == 1
+    assert "Error: Code intelligence graph not found" in result.output
+    assert "Code intelligence requires Graphify extraction" in result.output
+    assert "codealign init --force" in result.output

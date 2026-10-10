@@ -14,6 +14,7 @@ from codealign.agent.gemini import (
     GeminiNotFoundError,
     GeminiResult,
 )
+from codealign.agent.process import kill_process_tree
 
 __all__ = [
     "AntigravityAgent",
@@ -26,4 +27,5 @@ __all__ = [
     "GeminiExecutionError",
     "GeminiNotFoundError",
     "GeminiResult",
+    "kill_process_tree",
 ]

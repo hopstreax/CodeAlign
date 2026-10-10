@@ -27,6 +27,9 @@ def test_cli_help() -> None:
     for cmd in expected_commands:
         assert cmd in result.stdout
 
+    assert "Hand off implementation baseline to a coding agent CLI" in result.stdout
+    assert "Gemini CLI and verify" not in result.stdout
+
 
 def test_cli_version() -> None:
     """Verify codealign --version shows the current package version."""
@@ -88,3 +91,6 @@ def test_subcommand_placeholders() -> None:
     result_implement_help = runner.invoke(app, ["implement", "--help"])
     assert result_implement_help.exit_code == 0
     assert "Usage: codealign implement" in result_implement_help.stdout
+    assert "coding agent CLI" in result_implement_help.stdout
+    assert "--timeout" in result_implement_help.stdout
+    assert "-t" in result_implement_help.stdout

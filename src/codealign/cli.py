@@ -14,7 +14,6 @@ from codealign.commands import (
     verify_command,
 )
 
-
 app = typer.Typer(
     name="codealign",
     help="CodeAlign: Keep implementations aligned with developer intent.",
@@ -80,7 +79,7 @@ app.command(
 
 app.command(
     name="implement",
-    help="Hand off implementation baseline to Gemini CLI and verify resulting changes.",
+    help="Hand off implementation baseline to a coding agent CLI and verify resulting changes.",
 )(implement_command)
 
 
