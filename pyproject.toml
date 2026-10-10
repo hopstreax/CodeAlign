@@ -51,6 +51,9 @@ packages = ["src/codealign"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "e2e: Real-agent end-to-end acceptance tests (opt-in via CODEALIGN_RUN_REAL_AGENT=1).",
+]
 
 [tool.ruff]
 line-length = 100
