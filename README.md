@@ -36,6 +36,9 @@ Session Changeset / Post-Agent Snapshot             Git Working Tree Changes
 Session-Aware Verification                          codealign verify
         ↓                                                    ↓
                   PASS / WARN / FAIL (with Evidence)
+                                 │
+                                 ▼
+                     codealign status (Inspection)
 ```
 
 1. **Repository Setup & Code Intelligence:** `codealign init` discovers the Git repository and invokes [Graphify](https://github.com/Graphify-Labs/graphify) to extract AST symbols, dependencies, callers, and callees into `.codealign/graphify-out/graph.json`.
@@ -46,6 +49,10 @@ Session-Aware Verification                          codealign verify
 6. **Deterministic Verification:**
    - **Session-aware verification** (during `codealign implement`) verifies only the files and lines modified during the agent's run against baseline expectations, ignoring pre-existing dirty changes.
    - **Standalone verification** (`codealign verify`) evaluates all current working tree changes against the baseline commit.
+7. **Continuous Inspection & Status:** `codealign status` provides an on-demand, read-only diagnostic report of repository state, active baseline expectations, changes since the baseline commit, scope drift, and fresh verification findings of the current working tree.
+
+> [!NOTE]
+> While each command in this workflow (`init` → `analyze` → `baseline` → `context` → `implement` → `verify` → `status`) is implemented and independently tested, end-to-end multi-step validation across the complete sequence is the focus of the next milestone.
 
 ---
 
@@ -164,6 +171,12 @@ codealign verify --strict
 
 # Output machine-readable verification findings in JSON
 codealign verify --format json
+
+# 7. Inspect baseline metadata, changes, and fresh verification at any time
+codealign status
+
+# Inspect status using a custom baseline contract path
+codealign status --baseline custom_baseline.json
 ```
 
 ---
@@ -220,6 +233,73 @@ CodeAlign provides two modes of verification depending on the workflow stage:
 
 ---
 
+## Baseline & Verification Status (`codealign status`)
+
+The `codealign status` command provides an on-demand, read-only diagnostic report of your repository and alignment state without mutating any project files or re-running external tools:
+
+- **Repository & Git State:** Identifies repository name, current branch, HEAD commit, and whether the working tree is dirty or clean, noting any divergence from the baseline's original branch and commit.
+- **Active Baseline Contract:** Summarizes the active plan title, source file, creation timestamp, schema version, resolved/unresolved evidence counts, and explicit expectations (files, tests, symbols, constraints).
+- **Changes Since Baseline:** Analyzes Git diffs relative to the baseline commit to report modified, added, deleted, and renamed files.
+- **Scope Drift Detection:** Highlights any unexpected modified or added files that were not declared in the baseline expectations.
+- **Fresh Verification:** Runs an in-memory verification of the current working tree against the baseline contract, reporting PASS/WARN/FAIL status, finding counts, and detailed failure/warning messages.
+
+### Operational Characteristics
+
+- **Safe & Read-Only:** Does not re-run Graphify AST extraction, does not invoke coding agents, and does not alter files in `.codealign/`.
+- **No Result Persistence:** Verification findings are calculated live in memory for the status report; they are not saved to disk.
+- **Working-Tree Scope:** Like standalone `codealign verify`, `codealign status` evaluates the active working tree against the baseline commit. It does not have access to the pre/post session snapshots captured during `codealign implement`.
+- **Custom Baselines:** By default, loads `.codealign/baseline.json`. You can point to a custom baseline contract using `--baseline <path>` or `-b <path>`.
+- **Exit Code Semantics:** Returns exit code `0` whenever the status report is successfully displayed (even when verification reports warnings, failures, or scope drift). Returns exit code `1` only for prerequisite and operational errors (not a Git repository, uninitialized CodeAlign, missing baseline, corrupt JSON, or missing baseline commit in Git history).
+
+### Example Output
+
+```text
+$ codealign status
+CODEALIGN STATUS
+================
+
+Repository:
+  Name:          CodeAlign
+  Branch:        main
+  HEAD:          0f53945
+  Working tree:  dirty (uncommitted changes present)
+
+Active Baseline:
+  Plan:          Implement Read-Only Status Command (plans/status.md)
+  Created:       2026-10-10T18:22:10Z (schema: 1.0)
+  Evidence:      5 resolved, 0 unresolved
+  Expectations:  4 files, 2 tests, 3 symbols, 1 constraints
+
+Changes Since Baseline:
+  Files:         2 modified, 1 added, 0 deleted, 0 renamed
+  Scope drift:   clean (0 unexpected files)
+
+Fresh Verification (Current Working Tree):
+  Status:        PASS
+  Findings:      8 passed, 0 warnings, 0 failures
+  Summary:       All baseline expectations satisfied.
+
+Note: Standalone status reflects fresh verification of the current working tree against the baseline commit.
+It does not have the pre/post session snapshots available during 'codealign implement'.
+```
+
+If unexpected files or warnings are detected, `codealign status` flags them directly in the report:
+
+```text
+  Scope drift:   1 unexpected file(s)
+    [!] src/utils/temp.py
+
+Fresh Verification (Current Working Tree):
+  Status:        WARN
+  Findings:      7 passed, 1 warnings, 0 failures
+  Summary:       Implementation mostly aligned with 1 warning(s).
+
+  Warnings:
+    [!] Unexpected file added: src/utils/temp.py (scope drift)
+```
+
+---
+
 ## Verification Semantics
 
 When evaluating changes against `.codealign/baseline.json`, CodeAlign verifies:
@@ -236,9 +316,13 @@ When evaluating changes against `.codealign/baseline.json`, CodeAlign verifies:
 
 ### Exit Code Rules
 
-- **`0`**: Verification passed (`PASS`), or passed with warnings (`WARN` in standard mode).
-- **`1`**: Verification failed (`FAIL`), warnings encountered in `--strict` mode, or invalid CLI parameters.
-- **`2`**: External coding agent returned a non-zero exit code during `codealign implement`.
+- **`codealign verify` & `codealign implement`:**
+  - **`0`**: Verification passed (`PASS`), or passed with warnings (`WARN` in standard mode).
+  - **`1`**: Verification failed (`FAIL`), warnings encountered in `--strict` mode, or invalid CLI parameters.
+  - **`2`**: External coding agent returned a non-zero exit code during `codealign implement`.
+- **`codealign status`:**
+  - **`0`**: Status report displayed successfully (regardless of verification findings).
+  - **`1`**: Operational or prerequisite error (not a Git repository, uninitialized CodeAlign, missing baseline, corrupt JSON, or missing commit).
 
 ---
 
@@ -255,7 +339,7 @@ The following command is currently registered as an experimental preview:
 Run the test suite and linter locally:
 
 ```bash
-# Run deterministic unit and integration test suite (211 tests)
+# Run deterministic unit and integration test suite (211 passed, 1 skipped)
 pytest -q
 
 # Run Ruff linter
@@ -264,6 +348,8 @@ ruff check src tests
 # Check Git diff formatting and line endings
 git diff --check
 ```
+
+The deterministic test suite covers CLI commands, baseline contracts, Graphify integration, Git diffing, session snapshots, process isolation, and verification logic without external network calls or agent invocations.
 
 ### Opt-In Real-Agent Acceptance Test (Tier 2)
 
