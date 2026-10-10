@@ -64,7 +64,7 @@ app.command(
 
 app.command(
     name="status",
-    help="Show current status of the implementation baseline and verification findings.",
+    help="[Preview] Show current status of the implementation baseline and verification findings.",
 )(status_command)
 
 app.command(
@@ -74,7 +74,7 @@ app.command(
 
 app.command(
     name="explain",
-    help="Explain verification findings and provide evidence-backed guidance for resolution.",
+    help="[Preview] Explain verification findings and provide guidance for resolution.",
 )(explain_command)
 
 app.command(
