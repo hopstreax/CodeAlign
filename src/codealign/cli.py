@@ -64,7 +64,7 @@ app.command(
 
 app.command(
     name="status",
-    help="[Preview] Show current status of the implementation baseline and verification findings.",
+    help="Show current status of the implementation baseline and verification findings.",
 )(status_command)
 
 app.command(

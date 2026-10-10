@@ -82,7 +82,7 @@ CodeAlign uses [Graphify](https://github.com/Graphify-Labs/graphify) as its code
 | `codealign context` | Export agent-consumable Markdown context (`.codealign/context.md`) | **Available** |
 | `codealign implement` | Hand off baseline context to a coding agent CLI and verify resulting session changes | **Available** |
 | `codealign verify` | Verify actual repository working tree changes against baseline contract | **Available** |
-| `codealign status` | Show current baseline and verification status (preview placeholder) | **Preview (Placeholder)** |
+| `codealign status` | View baseline contract metadata, changes since baseline, and fresh verification | **Available** |
 | `codealign explain` | Explain findings and provide evidence-backed guidance (preview placeholder) | **Preview (Placeholder)** |
 
 ---
@@ -244,9 +244,8 @@ When evaluating changes against `.codealign/baseline.json`, CodeAlign verifies:
 
 ## Preview Commands
 
-The following commands are currently registered as experimental previews:
+The following command is currently registered as an experimental preview:
 
-- **`codealign status`:** Returns a preview placeholder message. Full interactive tracking of active baselines and verification states is scheduled for a future release.
 - **`codealign explain`:** Returns a preview placeholder message. Detailed natural-language explanations of verification findings and remediation guidance are scheduled for a future release.
 
 ---
@@ -256,7 +255,7 @@ The following commands are currently registered as experimental previews:
 Run the test suite and linter locally:
 
 ```bash
-# Run deterministic unit and integration test suite (201 tests)
+# Run deterministic unit and integration test suite (211 tests)
 pytest -q
 
 # Run Ruff linter

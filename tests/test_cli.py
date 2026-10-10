@@ -78,8 +78,7 @@ def test_subcommand_placeholders() -> None:
 
     result_status = runner.invoke(app, ["status"])
     assert result_status.exit_code == 0
-    assert "CodeAlign status" in result_status.stdout
-    assert "[Preview]" in result_status.stdout
+    assert "CODEALIGN STATUS" in result_status.stdout
 
     result_context_help = runner.invoke(app, ["context", "--help"])
     assert result_context_help.exit_code == 0
